@@ -176,6 +176,24 @@ body {
 .edit-row-teams input:focus { border-color: var(--primary); }
 .edit-row-crop { width: 100%; border-radius: 6px; border: 1px solid var(--border); display: block; margin-top: 8px; }
 
+.calibrate-drag-box { margin: 14px 16px 0; padding: 12px; background: var(--light-bg); border-radius: 10px; }
+.calibrate-label { font-size: 11px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .3px; margin-bottom: 10px; }
+.calibrate-drag-wrap { position: relative; touch-action: none; border-radius: 8px; overflow: hidden; }
+.calibrate-drag-wrap img { width: 100%; display: block; pointer-events: none; -webkit-user-select: none; user-select: none; }
+.calibrate-line {
+  position: absolute; left: 0; right: 0; height: 36px; margin-top: -18px;
+  display: flex; align-items: center; cursor: ns-resize; touch-action: none;
+}
+.calibrate-line::before { content: ''; position: absolute; left: 0; right: 0; top: 50%; height: 3px; transform: translateY(-50%); background: currentColor; }
+.calibrate-line-first { color: #ff3b30; justify-content: flex-start; }
+.calibrate-line-last { color: #1e7e34; justify-content: flex-end; }
+.calibrate-line span {
+  position: relative; font-size: 10px; font-weight: 700; color: #fff;
+  padding: 2px 7px; border-radius: 4px; margin: 0 6px;
+}
+.calibrate-line-first span { background: #ff3b30; }
+.calibrate-line-last span { background: #1e7e34; }
+
 /* ── TABLE / WRAP ── */
 .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
 .loading-row { text-align: center; padding: 28px 16px; color: var(--muted); font-size: 13px; }
@@ -707,6 +725,8 @@ function renderKupong() {
     tallyBar.style.display = 'none';
     document.getElementById('delete-week-btn').style.display = 'none';
     body.innerHTML = decodePreviewHtml();
+    positionCalibrationLines();
+    initDragHandlers();
     return;
   }
 
@@ -850,6 +870,7 @@ async function onCouponFileChosen() {
       uploaded_by: session ? session.display_name : nextUploader(),
       imageUrl: URL.createObjectURL(file),
     };
+    initDragCalibration();
     render();
     await computeRowCrops(decodePreview);
     render();
@@ -901,6 +922,75 @@ async function computeRowCrops(preview) {
   });
 }
 
+// ── ROW-CROP CALIBRATION (drag two lines on the photo) ──
+// Automated row-position estimation (AI per-row text position, and separately a pixel-based
+// alternating-background-color detector) both proved unreliable in testing — the AI's numeric
+// coordinate output isn't grounded in real measurement, and the background-color signal is too
+// easily confused by the team-name text itself. A human dragging two lines against the real
+// photo is instant and always correct, so that's the actual mechanism now; the AI's per-row `y`
+// only serves as a starting position for the lines so there's usually little/no dragging needed.
+let dragCalib = null;
+
+function initDragCalibration() {
+  const rows = decodePreview.rows;
+  const withY = rows.map(r => r.y).filter(y => y != null);
+  dragCalib = {
+    row1_y: rows[0]?.y ?? (withY[0] ?? 0.3),
+    lastrow_y: rows[rows.length - 1]?.y ?? (withY[withY.length - 1] ?? 0.85),
+  };
+}
+
+function calibrationDragHtml(p) {
+  const n = p.rows.length;
+  return `
+    <div class="calibrate-drag-box">
+      <div class="calibrate-label">Dra linjerna till rad 1 och rad ${n} om bildutklippen inte stämmer</div>
+      <div class="calibrate-drag-wrap" id="calibrate-wrap">
+        <img src="${p.imageUrl}" alt="Uppladdad kupong" id="calibrate-img">
+        <div class="calibrate-line calibrate-line-first" id="calibrate-line-row1" data-key="row1_y"><span>Rad 1</span></div>
+        <div class="calibrate-line calibrate-line-last" id="calibrate-line-lastrow" data-key="lastrow_y"><span>Rad ${n}</span></div>
+      </div>
+      <button class="btn btn-primary btn-sm" style="margin-top:10px" onclick="applyDragCalibration()">✓ Klart – uppdatera bildutklipp</button>
+    </div>`;
+}
+
+function positionCalibrationLines() {
+  if (!dragCalib) return;
+  const l1 = document.getElementById('calibrate-line-row1');
+  const l2 = document.getElementById('calibrate-line-lastrow');
+  if (l1) l1.style.top = (dragCalib.row1_y * 100) + '%';
+  if (l2) l2.style.top = (dragCalib.lastrow_y * 100) + '%';
+}
+
+function initDragHandlers() {
+  const wrap = document.getElementById('calibrate-wrap');
+  if (!wrap || wrap.dataset.wired) return;
+  wrap.dataset.wired = '1';
+  ['calibrate-line-row1', 'calibrate-line-lastrow'].forEach(id => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    let dragging = false;
+    const move = clientY => {
+      const rect = wrap.getBoundingClientRect();
+      const frac = Math.min(1, Math.max(0, (clientY - rect.top) / rect.height));
+      el.style.top = (frac * 100) + '%';
+      dragCalib[el.dataset.key] = frac;
+    };
+    el.addEventListener('pointerdown', e => { dragging = true; el.setPointerCapture(e.pointerId); e.preventDefault(); });
+    el.addEventListener('pointermove', e => { if (dragging) move(e.clientY); });
+    el.addEventListener('pointerup', () => { dragging = false; });
+    el.addEventListener('pointercancel', () => { dragging = false; });
+  });
+}
+async function applyDragCalibration() {
+  const n = decodePreview.rows.length;
+  const { row1_y, lastrow_y } = dragCalib;
+  const step = n > 1 ? (lastrow_y - row1_y) / (n - 1) : 0;
+  decodePreview.rows.forEach((row, i) => { row.y = row1_y + i * step; });
+  await computeRowCrops(decodePreview);
+  render();
+}
+
 function decodePreviewHtml() {
   const p = decodePreview;
   const rowsHtml = p.rows.map((row, idx) => {
@@ -931,6 +1021,7 @@ function decodePreviewHtml() {
       <label>Laddas upp av</label>
       <div style="font-size:14px;font-weight:600">👤 ${esc(p.uploaded_by || '')}</div>
     </div>
+    ${p.imageUrl ? calibrationDragHtml(p) : ''}
     <div style="margin-top:8px">${rowsHtml}</div>
     <div class="form-actions">
       <button class="btn btn-outline" onclick="cancelDecodePreview()">Avbryt</button>
@@ -953,6 +1044,7 @@ function togglePreviewPick(idx, sign) {
 function updatePreviewField(idx, field, value) { decodePreview.rows[idx][field] = value; }
 function releaseDecodePreviewImage() {
   if (decodePreview && decodePreview.imageUrl) URL.revokeObjectURL(decodePreview.imageUrl);
+  dragCalib = null;
 }
 function cancelDecodePreview() { releaseDecodePreviewImage(); decodePreview = null; render(); }
 async function confirmDecodePreview() {
