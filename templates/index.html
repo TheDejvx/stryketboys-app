@@ -299,7 +299,10 @@ body {
       <div class="card">
         <div class="card-header">
           <h2 id="kupong-title">🎟️ Denna veckans kupong</h2>
-          <span class="matches-meta" id="draw-updated"></span>
+          <div style="display:flex;align-items:center;gap:8px">
+            <span class="matches-meta" id="draw-updated"></span>
+            <button class="btn-ghost" id="delete-week-btn" style="display:none" onclick="deleteCurrentWeek()" title="Ta bort kupong">🗑</button>
+          </div>
         </div>
         <div class="draw-meta" id="draw-meta"></div>
         <div id="kupong-body">
@@ -691,12 +694,14 @@ function renderKupong() {
 
   if (decodePreview) {
     tallyBar.style.display = 'none';
+    document.getElementById('delete-week-btn').style.display = 'none';
     body.innerHTML = decodePreviewHtml();
     return;
   }
 
   if (!drawData) {
     tallyBar.style.display = 'none';
+    document.getElementById('delete-week-btn').style.display = 'none';
     body.innerHTML = `<div class="loading-row">Hämtar aktuell omgång...</div>`;
     return;
   }
@@ -704,6 +709,7 @@ function renderKupong() {
   const week = currentWeek();
   if (!week) {
     tallyBar.style.display = 'none';
+    document.getElementById('delete-week-btn').style.display = 'none';
     const authed = checkAuth();
     const suggestion = nextUploader();
     body.innerHTML = `
@@ -781,6 +787,7 @@ function renderKupong() {
   }).join('');
 
   document.getElementById('kupong-title').textContent = `🎟️ Kupong v${drawData.draw_number ?? ''} – ${esc(week.uploaded_by || '')}`;
+  document.getElementById('delete-week-btn').style.display = '';
   tallyBar.style.display = '';
   document.getElementById('tally-correct').textContent = correct;
   document.getElementById('tally-wrong').textContent = wrong;
@@ -905,6 +912,19 @@ async function confirmDecodePreview() {
   }
 }
 
+function deleteWeek(weekId) {
+  requireAuth(() => {
+    if (!confirm('Ta bort denna kupong? Går inte att ångra.')) return;
+    state.weeks = (state.weeks || []).filter(w => w.id !== weekId);
+    render();
+    saveData();
+  });
+}
+function deleteCurrentWeek() {
+  const week = currentWeek();
+  if (week) deleteWeek(week.id);
+}
+
 // ── HISTORIK ──
 function weekTally(week) {
   let correct = 0, total = 0;
@@ -927,7 +947,10 @@ function renderHistory() {
         <div class="week-card-title">Omgång ${w.draw_number ?? '–'}</div>
         <div class="week-card-sub">${esc(w.uploaded_by || '')} · ${esc(w.system_type || 'Enkelrad')}</div>
       </div>
-      <div class="week-tally">${tallyStr}</div>
+      <div style="display:flex;align-items:center;gap:10px">
+        <div class="week-tally">${tallyStr}</div>
+        <button class="btn-ghost" onclick="deleteWeek('${esc(w.id)}')" title="Ta bort kupong">🗑</button>
+      </div>
     </div>`;
   }).join('');
 }
