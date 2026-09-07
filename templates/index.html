@@ -713,7 +713,7 @@ function renderKupong() {
         ${suggestion ? `<div style="margin-top:6px;font-size:12px">Näst på tur: <b>${esc(suggestion)}</b></div>` : ''}
         ${authed ? `
           <div style="margin-top:14px">
-            <input type="file" accept="image/*" capture="environment" id="coupon-file" style="display:none" onchange="onCouponFileChosen()">
+            <input type="file" accept="image/*" id="coupon-file" style="display:none" onchange="onCouponFileChosen()">
             <button class="btn btn-primary" onclick="document.getElementById('coupon-file').click()">📤 Ladda upp kupong</button>
           </div>
           <div id="upload-status" style="margin-top:10px;font-size:12px;color:var(--muted)"></div>
