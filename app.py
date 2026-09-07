@@ -169,8 +169,12 @@ DESCRIBE_PROMPT = (
     "Process the rows ONE AT A TIME, in strict order from the first row to the last. Do NOT skip ahead and do "
     "NOT batch multiple rows together — for EVERY row, immediately after analyzing it, output its result line "
     "before moving to the next row.\n\n"
-    "Before row 1, output one line: SYSTEM_TYPE: <the label near the top of the coupon, e.g. 'M-system', "
-    "'B-system', 'Helsystem', or 'Enkelrad' if none is visible>\n\n"
+    "Before row 1, output these three lines (rough estimates are fine, not per-pixel precision):\n"
+    "ROW1_Y: <fraction from 0.00 (very top of image) to 1.00 (very bottom), for the vertical center of the "
+    "FIRST match row>\n"
+    "LASTROW_Y: <fraction from 0.00 to 1.00, for the vertical center of the LAST match row>\n"
+    "SYSTEM_TYPE: <the label near the top of the coupon, e.g. 'M-system', 'B-system', 'Helsystem', or "
+    "'Enkelrad' if none is visible>\n\n"
     "Then for every single row, output exactly this two-part block, in order:\n"
     "Analysis: name the two teams, then describe what you see for the '1', 'X', '2' pills individually — do "
     "not assume a pattern from previous rows, and do not stop looking after finding the first selected pill. "
@@ -190,6 +194,13 @@ ROW_LINE_RE = re.compile(
     re.IGNORECASE,
 )
 SYSTEM_TYPE_RE = re.compile(r'SYSTEM_TYPE:\s*(.+)', re.IGNORECASE)
+ROW1_Y_RE = re.compile(r'ROW1_Y:\s*([\d.]+)', re.IGNORECASE)
+LASTROW_Y_RE = re.compile(r'LASTROW_Y:\s*([\d.]+)', re.IGNORECASE)
+# Used whenever the model's own estimate is missing or fails a basic sanity check — rough
+# proportions of a typical "Mina spel" coupon screenshot (header/deadline/system-type info
+# above the list). Only used to size per-row preview crops, never anything decode-accuracy
+# critical, so an imprecise fallback here just means a slightly mis-cropped reference image.
+FALLBACK_ROW1_Y, FALLBACK_LASTROW_Y = 0.28, 0.92
 
 def parse_decode_analysis(text):
     """Deterministically parse every 'ROW <n> | ...' result line out of the model's response
@@ -212,7 +223,15 @@ def parse_decode_analysis(text):
         })
     sys_match = SYSTEM_TYPE_RE.search(text)
     system_type = sys_match.group(1).strip() if sys_match else 'Enkelrad'
-    return system_type, rows
+
+    row1_m, lastrow_m = ROW1_Y_RE.search(text), LASTROW_Y_RE.search(text)
+    row1_y = float(row1_m.group(1)) if row1_m else None
+    lastrow_y = float(lastrow_m.group(1)) if lastrow_m else None
+    if row1_y is None or lastrow_y is None or not (0.0 <= row1_y < lastrow_y <= 1.0 and lastrow_y - row1_y >= 0.25):
+        print(f'ROW1_Y/LASTROW_Y sanity check failed (row1_y={row1_y}, lastrow_y={lastrow_y}) — using fallback layout')
+        row1_y, lastrow_y = FALLBACK_ROW1_Y, FALLBACK_LASTROW_Y
+
+    return system_type, rows, {'row1_y': row1_y, 'lastrow_y': lastrow_y}
 
 def fuzzy_match_event(home, away, events):
     query = f'{home} {away}'.lower().strip()
@@ -265,7 +284,7 @@ def decode_coupon():
         print('--- coupon decode raw analysis ---')
         print(analysis_text)
         print('--- end raw analysis ---')
-        system_type, rows = parse_decode_analysis(analysis_text)
+        system_type, rows, layout = parse_decode_analysis(analysis_text)
         if not rows:
             return jsonify({'status': 'error', 'message': 'Could not parse the model’s analysis — try again'}), 500
         if len(rows) != 13:
@@ -297,6 +316,7 @@ def decode_coupon():
         'system_type': system_type,
         'rows': rows,
         'draw_number': (draw or {}).get('draw_number'),
+        'layout': layout,
     })
 
 @app.route('/api/coupon/save', methods=['POST'])

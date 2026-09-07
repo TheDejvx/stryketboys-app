@@ -163,8 +163,10 @@ body {
 .upload-preview-info { flex: 1; font-size: 12px; color: var(--muted); }
 
 /* ── EDIT ROW (decode preview) ── */
-.edit-row { padding: 10px 14px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 8px; }
-.edit-row:last-child { border-bottom: none; }
+.edit-row-block { padding: 10px 14px; border-bottom: 1px solid var(--border); }
+.edit-row-block:last-child { border-bottom: none; }
+.edit-row-block.low-conf { background: #fff8e1; }
+.edit-row-fields { display: flex; align-items: center; gap: 8px; }
 .edit-row-num { font-size: 11px; color: var(--muted); font-weight: 700; width: 18px; }
 .edit-row-teams { flex: 1; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .edit-row-teams input {
@@ -172,6 +174,7 @@ body {
   outline: none; background: var(--white); color: var(--text);
 }
 .edit-row-teams input:focus { border-color: var(--primary); }
+.edit-row-crop { width: 100%; border-radius: 6px; border: 1px solid var(--border); display: block; margin-top: 8px; }
 
 /* ── TABLE / WRAP ── */
 .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
@@ -846,13 +849,47 @@ async function onCouponFileChosen() {
       draw_number: data.draw_number ?? (drawData ? drawData.draw_number : null),
       uploaded_by: session ? session.display_name : nextUploader(),
       imageUrl: URL.createObjectURL(file),
+      layout: data.layout || { row1_y: 0.28, lastrow_y: 0.92 },
     };
+    render();
+    await computeRowCrops(decodePreview);
     render();
   } catch (e) {
     if (statusEl) statusEl.textContent = 'Kunde inte analysera bilden.';
     if (btn) { btn.disabled = false; btn.textContent = '📤 Ladda upp kupong'; }
     console.error(e);
   }
+}
+
+// Slices the uploaded photo into one small cropped snippet per row (client-side canvas, using
+// the coarse row1_y/lastrow_y estimate from the decode response) so each row's edit fields can
+// show the matching piece of the real coupon directly underneath, instead of one big image at
+// the bottom the user has to scroll back and forth to compare against.
+function computeRowCrops(preview) {
+  return new Promise(resolve => {
+    const img = new Image();
+    img.onload = () => {
+      const w = img.naturalWidth, h = img.naturalHeight;
+      const n = preview.rows.length;
+      const { row1_y, lastrow_y } = preview.layout;
+      const rowHeight = n > 1 ? (lastrow_y - row1_y) / (n - 1) : 0.06;
+      preview.rows.forEach((row, i) => {
+        const centerY = row1_y + i * rowHeight;
+        const top = Math.max(0, centerY - rowHeight * 0.65);
+        const bottom = Math.min(1, centerY + rowHeight * 0.65);
+        const sy = Math.round(top * h);
+        const sh = Math.max(1, Math.round((bottom - top) * h));
+        const canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = sh;
+        canvas.getContext('2d').drawImage(img, 0, sy, w, sh, 0, 0, w, sh);
+        row.cropUrl = canvas.toDataURL('image/jpeg', 0.85);
+      });
+      resolve();
+    };
+    img.onerror = () => resolve();
+    img.src = preview.imageUrl;
+  });
 }
 
 function decodePreviewHtml() {
@@ -862,14 +899,17 @@ function decodePreviewHtml() {
       const selected = (row.picks || []).includes(sign);
       return `<span class="pick-pill editable${selected ? ' selected' : ''}" onclick="togglePreviewPick(${idx},'${sign}')">${sign}</span>`;
     }).join('');
-    return `<div class="edit-row${row.low_confidence ? ' low-conf' : ''}">
-      <div class="edit-row-num">#${row.row_num ?? idx + 1}</div>
-      <div class="edit-row-teams">
-        <input value="${esc(row.home)}" oninput="updatePreviewField(${idx},'home',this.value)" placeholder="Hemmalag">
-        <input value="${esc(row.away)}" oninput="updatePreviewField(${idx},'away',this.value)" placeholder="Bortalag">
-        ${row.low_confidence ? '<span class="low-conf-flag">⚠ Matcha inte mot spelschemat – kontrollera</span>' : ''}
+    return `<div class="edit-row-block${row.low_confidence ? ' low-conf' : ''}">
+      <div class="edit-row-fields">
+        <div class="edit-row-num">#${row.row_num ?? idx + 1}</div>
+        <div class="edit-row-teams">
+          <input value="${esc(row.home)}" oninput="updatePreviewField(${idx},'home',this.value)" placeholder="Hemmalag">
+          <input value="${esc(row.away)}" oninput="updatePreviewField(${idx},'away',this.value)" placeholder="Bortalag">
+          ${row.low_confidence ? '<span class="low-conf-flag">⚠ Matcha inte mot spelschemat – kontrollera</span>' : ''}
+        </div>
+        <div class="match-pills">${pillsHtml}</div>
       </div>
-      <div class="match-pills">${pillsHtml}</div>
+      ${row.cropUrl ? `<img src="${row.cropUrl}" alt="Rad ${row.row_num ?? idx + 1} i original­bilden" class="edit-row-crop">` : ''}
     </div>`;
   }).join('');
 
@@ -888,10 +928,10 @@ function decodePreviewHtml() {
       <button class="btn btn-primary" onclick="confirmDecodePreview()">✓ Spara kupong</button>
     </div>
     ${p.imageUrl ? `
-      <div style="padding:14px 16px;border-top:1px solid var(--border)">
-        <div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;margin-bottom:8px">Original bild – jämför och rätta ovan</div>
-        <img src="${p.imageUrl}" alt="Uppladdad kupong" style="width:100%;border-radius:8px;border:1px solid var(--border);display:block">
-      </div>
+      <details style="padding:14px 16px;border-top:1px solid var(--border)">
+        <summary style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;cursor:pointer">Visa hela originalbilden</summary>
+        <img src="${p.imageUrl}" alt="Uppladdad kupong" style="width:100%;border-radius:8px;border:1px solid var(--border);display:block;margin-top:10px">
+      </details>
     ` : ''}`;
 }
 function togglePreviewPick(idx, sign) {
