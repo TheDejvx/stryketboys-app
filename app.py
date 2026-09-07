@@ -178,15 +178,11 @@ DECODE_TOOL = {
                         'home': {'type': 'string'},
                         'away': {'type': 'string'},
                         'kickoff_time': {'type': 'string', 'description': "Text as shown, e.g. 'Idag 18:30'"},
-                        'picks': {
-                            'type': 'array',
-                            'items': {'type': 'string', 'enum': ['1', 'X', '2']},
-                            'minItems': 1,
-                            'maxItems': 3,
-                            'description': 'Which of 1/X/2 are selected on this row (solid dark-navy fill with white text = selected).'
-                        }
+                        'one_selected': {'type': 'boolean', 'description': "True only if the '1' button has a solid dark-navy fill with white text. Judge this independently of X and 2 — do not assume only one button per row can be selected."},
+                        'x_selected': {'type': 'boolean', 'description': "True only if the 'X' button has a solid dark-navy fill with white text. Judge this independently of 1 and 2 — do not assume only one button per row can be selected."},
+                        'two_selected': {'type': 'boolean', 'description': "True only if the '2' button has a solid dark-navy fill with white text. Judge this independently of 1 and X — do not assume only one button per row can be selected."},
                     },
-                    'required': ['row_num', 'home', 'away', 'picks']
+                    'required': ['row_num', 'home', 'away', 'one_selected', 'x_selected', 'two_selected']
                 }
             }
         },
@@ -196,11 +192,19 @@ DECODE_TOOL = {
 
 DECODE_PROMPT = (
     "This is a screenshot of a Svenska Spel Stryktipset betting coupon (Swedish football pool betting, "
-    "normally 13 rows). Each row has three small pill-shaped buttons labeled 1, X, 2 in that order.\n\n"
-    "A button is SELECTED if it has a solid dark navy blue fill with white text.\n"
+    "normally 13 rows). Each row has three separate pill-shaped buttons labeled 1, X, 2.\n\n"
+    "CRITICAL: these are NOT radio buttons. More than one button on the same row can be selected "
+    "simultaneously — this is a normal, common 'garderad rad' (system bet row), e.g. both X and 2 filled "
+    "on the same row at once. Do NOT assume a row has only one selection. You must inspect the '1' button, "
+    "the 'X' button, and the '2' button on every row as three completely independent yes/no questions — "
+    "checking whether '1' is filled tells you nothing about whether 'X' or '2' are also filled. It is very "
+    "common for a row to have exactly two buttons filled (e.g. X and 2 both selected, with 1 empty) — do not "
+    "stop looking after finding the first filled button on a row.\n\n"
+    "A button is SELECTED (independently, per-button) if it has a solid dark navy blue fill with white text.\n"
     "A button is NOT selected if it has a white/light background with a thin gray border and dark text.\n\n"
     "For each row, read: the home and away team names, the kickoff time text exactly as shown (e.g. 'Idag 18:30'), "
-    "and exactly which of 1/X/2 are selected — a row can have 1, 2, or 3 signs selected (system bets). "
+    "and set one_selected/x_selected/two_selected independently and truthfully based on what you actually see "
+    "for that specific button — not based on a pattern or assumption from other rows. "
     "Also read the system type label shown near the top of the coupon if any (e.g. 'M-system', 'B-system', 'Helsystem'); "
     "use 'Enkelrad' if none is visible.\n\n"
     "Call record_coupon with the full structured result for every row visible on the coupon."
@@ -255,11 +259,18 @@ def decode_coupon():
 
     rows = decoded.get('rows', [])
     for row in rows:
+        picks = []
+        if row.pop('one_selected', False): picks.append('1')
+        if row.pop('x_selected', False): picks.append('X')
+        if row.pop('two_selected', False): picks.append('2')
+        row['picks'] = picks or ['1']  # never leave a row with zero picks — flagged below if so
+        row['zero_picks_read'] = not picks
+
         match, score = fuzzy_match_event(row.get('home', ''), row.get('away', ''), events)
         if match and score > 0.55:
             row['match_id'] = match['match_id']
             row['match_start'] = match['match_start']
-            row['low_confidence'] = False
+            row['low_confidence'] = row['zero_picks_read']
         else:
             row['match_id'] = None
             row['match_start'] = None
