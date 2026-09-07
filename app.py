@@ -162,25 +162,29 @@ def get_anthropic():
 
 DESCRIBE_PROMPT = (
     "You are given TWO images of the same Svenska Spel Stryktipset betting coupon (Swedish football pool "
-    "betting). The FIRST image is the full coupon screenshot — use it to read team names, kickoff times, row "
-    "order, and the system type label. The SECOND image is a zoomed-in, enlarged crop of just the right-hand "
-    "column containing the '1' / 'X' / '2' pill buttons for every row, lined up top-to-bottom in the same "
-    "order as the rows in the first image — use this second image specifically to judge each pill's fill "
-    "color, since it is much larger and clearer there than in the full screenshot.\n\n"
+    "betting). The FIRST image is the full coupon screenshot — use it to read team names, kickoff times, and "
+    "the system type label. The SECOND image is a zoomed-in composite: for every row, its printed row NUMBER "
+    "(far-left of that row) has been cropped and pasted directly next to that SAME row's '1' / 'X' / '2' pill "
+    "buttons (far-right of that row), enlarged for clarity, with the row number and its own pills at the same "
+    "vertical position — so you can match each pill-row to its row number directly within this second image "
+    "itself, without needing to count or cross-reference rows against the first image. Use this second image "
+    "specifically to judge each pill's fill color, since it is much larger and clearer there than in the full "
+    "screenshot, and use its row numbers as the ground truth for which row you are looking at.\n\n"
     "Each row has three pill buttons in a fixed left-to-right order: '1', 'X', '2'. A pill is SELECTED if its "
     "background is a solid dark navy blue with white text, and NOT selected if its background is white/very "
     "light with a thin gray border and dark text.\n\n"
-    "Process the rows ONE AT A TIME, in strict order from the first row to the last, matching each row between "
-    "the two images by its position in the list. Do NOT skip ahead and do NOT batch multiple rows together — "
-    "for EVERY row, immediately after analyzing it, output its result line before moving to the next row.\n\n"
+    "Process the rows ONE AT A TIME, in strict order from the first row to the last, using the row numbers "
+    "visible in the second image as ground truth, and the first image only for team names and kickoff time. "
+    "Do NOT skip ahead and do NOT batch multiple rows together — for EVERY row, immediately after analyzing "
+    "it, output its result line before moving to the next row.\n\n"
     "Before row 1, output one line: SYSTEM_TYPE: <the label near the top of the coupon, e.g. 'M-system', "
     "'B-system', 'Helsystem', or 'Enkelrad' if none is visible>\n\n"
     "Then for every single row, output exactly this two-part block, in order:\n"
     "Analysis: name the two teams (from image 1), then describe what you see for the '1', 'X', '2' pills "
-    "individually (from image 2, the zoomed column) — do not assume a pattern from previous rows, and do not "
-    "stop looking after finding the first selected pill. It is common and expected for two pills to be "
-    "selected on the same row at once (e.g. X and 2 both selected, 1 empty) — this is a normal 'garderad rad' "
-    "(system bet row), not an error.\n"
+    "individually (from image 2, next to that row's own number) — do not assume a pattern from previous rows, "
+    "and do not stop looking after finding the first selected pill. It is common and expected for two pills "
+    "to be selected on the same row at once (e.g. X and 2 both selected, 1 empty) — this is a normal 'garderad "
+    "rad' (system bet row), not an error.\n"
     "ROW <n> | <home team> - <away team> | <kickoff text> | 1=<0 or 1> X=<0 or 1> 2=<0 or 1>\n\n"
     "Use 1 for selected, 0 for not selected in the ROW line. Example of one complete row's block:\n"
     "Analysis: Cardiff vs Sheffield U. In the zoomed column, the 1 pill is white with a gray border — not "
@@ -220,19 +224,25 @@ def parse_decode_analysis(text):
     system_type = sys_match.group(1).strip() if sys_match else 'Enkelrad'
     return system_type, rows
 
-def crop_pills_column(img, left_frac=0.68, upscale=2.5, max_height=4000):
+def crop_row_numbers_and_pills(img, num_frac=0.08, pills_frac=0.68, upscale=2.5, max_height=4000, gap=24):
     """Deterministic crop, zero model localization involved (coordinate estimation from the
     model proved unreliable — it fabricated a suspiciously perfect linear sequence rather than
-    actually measuring). Right-hand ~32% column is a generous, safe margin for where the 1/X/2
-    pills sit in this app's layout."""
+    actually measuring). Stitches the far-left row-number column directly next to the far-right
+    pills column (same original y-coordinates preserved, so row N's number stays vertically
+    aligned with row N's own pills) — a crop of the pills alone gave the model nothing to anchor
+    row identity to, risking a miscounted/shifted match against the full screenshot."""
     w, h = img.size
-    left = int(left_frac * w)
-    cropped = img.crop((left, 0, w, h)).convert('RGB')
-    new_w, new_h = int(cropped.width * upscale), int(cropped.height * upscale)
+    left_strip = img.crop((0, 0, int(num_frac * w), h)).convert('RGB')
+    right_strip = img.crop((int(pills_frac * w), 0, w, h)).convert('RGB')
+    total_w = left_strip.width + gap + right_strip.width
+    composite = Image.new('RGB', (total_w, h), (255, 255, 255))
+    composite.paste(left_strip, (0, 0))
+    composite.paste(right_strip, (left_strip.width + gap, 0))
+    new_w, new_h = int(total_w * upscale), int(h * upscale)
     if new_h > max_height:
         scale = max_height / new_h
         new_w, new_h = int(new_w * scale), int(new_h * scale)
-    return cropped.resize((new_w, new_h), Image.LANCZOS)
+    return composite.resize((new_w, new_h), Image.LANCZOS)
 
 def fuzzy_match_event(home, away, events):
     query = f'{home} {away}'.lower().strip()
@@ -266,7 +276,7 @@ def decode_coupon():
     image_block = {'type': 'image', 'source': {'type': 'base64', 'media_type': media_type, 'data': b64}}
 
     zoom_buf = io.BytesIO()
-    crop_pills_column(pil_img).save(zoom_buf, format='JPEG', quality=90)
+    crop_row_numbers_and_pills(pil_img).save(zoom_buf, format='JPEG', quality=90)
     zoom_block = {
         'type': 'image',
         'source': {'type': 'base64', 'media_type': 'image/jpeg', 'data': base64.b64encode(zoom_buf.getvalue()).decode('utf-8')},
@@ -294,8 +304,13 @@ def decode_coupon():
         system_type, rows = parse_decode_analysis(analysis_text)
         if not rows:
             return jsonify({'status': 'error', 'message': 'Could not parse the model’s analysis — try again'}), 500
-        if len(rows) < 13:
-            print(f'WARNING: only parsed {len(rows)} rows, expected 13')
+        if len(rows) != 13:
+            missing = sorted(set(range(1, 14)) - {r['row_num'] for r in rows})
+            print(f'WARNING: parsed {len(rows)} rows, expected 13 — missing row(s): {missing}')
+            return jsonify({
+                'status': 'error',
+                'message': f'Läste bara {len(rows)} av 13 rader (saknar rad {", ".join(map(str, missing))}) — försök igen',
+            }), 500
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
