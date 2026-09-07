@@ -176,20 +176,17 @@ DESCRIBE_PROMPT = (
     "not assume a pattern from previous rows, and do not stop looking after finding the first selected pill. "
     "It is common and expected for two pills to be selected on the same row at once (e.g. X and 2 both "
     "selected, 1 empty) — this is a normal 'garderad rad' (system bet row), not an error.\n"
-    "ROW <n> | <home team> - <away team> | <kickoff text> | Y=<0.00-1.00> | 1=<0 or 1> X=<0 or 1> 2=<0 or 1>\n\n"
-    "Y is the vertical position of THIS row's own text within the full image, as a fraction of total image "
-    "height (0.00 = very top of the image, 1.00 = very bottom) — a rough estimate of where you're reading "
-    "this row's team names from is fine, it doesn't need pixel precision. Use 1 for selected, 0 for not "
-    "selected in the ROW line. Example of one complete row's block:\n"
+    "ROW <n> | <home team> - <away team> | <kickoff text> | 1=<0 or 1> X=<0 or 1> 2=<0 or 1>\n\n"
+    "Use 1 for selected, 0 for not selected in the ROW line. Example of one complete row's block:\n"
     "Analysis: The 1 pill is white with a gray border — not selected. The X pill is solid dark navy with "
     "white text — selected. The 2 pill is also solid dark navy with white text — selected.\n"
-    "ROW 7 | Cardiff - Sheffield U | Idag 16:00 | Y=0.53 | 1=0 X=1 2=1\n\n"
+    "ROW 7 | Cardiff - Sheffield U | Idag 16:00 | 1=0 X=1 2=1\n\n"
     "Begin now with SYSTEM_TYPE, then Row 1's analysis and ROW line, then Row 2's, continuing strictly in "
     "order through every row visible on the coupon. Do not skip any row."
 )
 
 ROW_LINE_RE = re.compile(
-    r'ROW\s+(\d+)\s*\|\s*(.+?)\s*-\s*(.+?)\s*\|\s*(.*?)\s*\|\s*Y=([\d.]+)\s*\|\s*1=([01])\s+X=([01])\s+2=([01])',
+    r'ROW\s+(\d+)\s*\|\s*(.+?)\s*-\s*(.+?)\s*\|\s*(.*?)\s*\|\s*1=([01])\s+X=([01])\s+2=([01])',
     re.IGNORECASE,
 )
 SYSTEM_TYPE_RE = re.compile(r'SYSTEM_TYPE:\s*(.+)', re.IGNORECASE)
@@ -197,24 +194,19 @@ SYSTEM_TYPE_RE = re.compile(r'SYSTEM_TYPE:\s*(.+)', re.IGNORECASE)
 def parse_decode_analysis(text):
     """Deterministically parse every 'ROW <n> | ...' result line out of the model's response
     (interleaved one per row, right after that row's own analysis) — no second LLM call
-    involved, so nothing can get lost in an LLM 're-transcribing itself' step. Each row reports
-    its OWN vertical text position (Y) rather than interpolating from two endpoints across all
-    13 rows — team-name text is something the model reads reliably, unlike small pill colors, and
-    per-row anchoring avoids the compounding drift a 2-point interpolation produced."""
+    involved, so nothing can get lost in an LLM 're-transcribing itself' step."""
     rows = []
     for m in ROW_LINE_RE.finditer(text):
-        row_num, home, away, kickoff, y, one, x, two = m.groups()
+        row_num, home, away, kickoff, one, x, two = m.groups()
         picks = []
         if one == '1': picks.append('1')
         if x == '1': picks.append('X')
         if two == '1': picks.append('2')
-        y = float(y)
         rows.append({
             'row_num': int(row_num),
             'home': home.strip(),
             'away': away.strip(),
             'kickoff_time': kickoff.strip(),
-            'y': y if 0.0 <= y <= 1.0 else None,
             'picks': picks or ['1'],
             'zero_picks_read': not picks,
         })
