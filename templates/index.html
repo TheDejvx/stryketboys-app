@@ -176,6 +176,15 @@ body {
 .edit-row-teams input:focus { border-color: var(--primary); }
 .edit-row-crop { width: 100%; border-radius: 6px; border: 1px solid var(--border); display: block; margin-top: 8px; }
 
+.calibrate-box { margin: 14px 16px 0; padding: 12px; background: var(--light-bg); border-radius: 10px; }
+.calibrate-label { font-size: 11px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .3px; margin-bottom: 10px; }
+.calibrate-row { display: flex; gap: 12px; align-items: flex-start; }
+.calibrate-sliders { flex: 1; display: flex; flex-direction: column; gap: 4px; }
+.calibrate-sliders label { font-size: 10.5px; color: var(--muted); margin-top: 4px; }
+.calibrate-sliders input[type="range"] { width: 100%; }
+.calibrate-sliders .btn { margin-top: 10px; align-self: flex-start; }
+.calibrate-preview-img { width: 120px; border-radius: 6px; border: 1px solid var(--border); flex-shrink: 0; }
+
 /* ── TABLE / WRAP ── */
 .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
 .loading-row { text-align: center; padding: 28px 16px; color: var(--muted); font-size: 13px; }
@@ -851,6 +860,7 @@ async function onCouponFileChosen() {
       imageUrl: URL.createObjectURL(file),
       layout: data.layout || { row1_y: 0.28, lastrow_y: 0.92 },
     };
+    initCalibration();
     render();
     await computeRowCrops(decodePreview);
     render();
@@ -861,35 +871,94 @@ async function onCouponFileChosen() {
   }
 }
 
-// Slices the uploaded photo into one small cropped snippet per row (client-side canvas, using
-// the coarse row1_y/lastrow_y estimate from the decode response) so each row's edit fields can
-// show the matching piece of the real coupon directly underneath, instead of one big image at
-// the bottom the user has to scroll back and forth to compare against.
-function computeRowCrops(preview) {
+// Crops one row-sized band out of an already-loaded Image at a given vertical center, as a data
+// URL. Shared by the bulk per-row crop generator and the live calibration preview below.
+function cropRowBand(img, centerYFrac, rowHeightFrac) {
+  const w = img.naturalWidth, h = img.naturalHeight;
+  const top = Math.max(0, centerYFrac - rowHeightFrac * 0.55);
+  const bottom = Math.min(1, centerYFrac + rowHeightFrac * 0.55);
+  const sy = Math.round(top * h);
+  const sh = Math.max(1, Math.round((bottom - top) * h));
+  const canvas = document.createElement('canvas');
+  canvas.width = w;
+  canvas.height = sh;
+  canvas.getContext('2d').drawImage(img, 0, sy, w, sh, 0, 0, w, sh);
+  return canvas.toDataURL('image/jpeg', 0.85);
+}
+function loadImage(url) {
   return new Promise(resolve => {
     const img = new Image();
-    img.onload = () => {
-      const w = img.naturalWidth, h = img.naturalHeight;
-      const n = preview.rows.length;
-      const { row1_y, lastrow_y } = preview.layout;
-      const rowHeight = n > 1 ? (lastrow_y - row1_y) / (n - 1) : 0.06;
-      preview.rows.forEach((row, i) => {
-        const centerY = row1_y + i * rowHeight;
-        const top = Math.max(0, centerY - rowHeight * 0.65);
-        const bottom = Math.min(1, centerY + rowHeight * 0.65);
-        const sy = Math.round(top * h);
-        const sh = Math.max(1, Math.round((bottom - top) * h));
-        const canvas = document.createElement('canvas');
-        canvas.width = w;
-        canvas.height = sh;
-        canvas.getContext('2d').drawImage(img, 0, sy, w, sh, 0, 0, w, sh);
-        row.cropUrl = canvas.toDataURL('image/jpeg', 0.85);
-      });
-      resolve();
-    };
-    img.onerror = () => resolve();
-    img.src = preview.imageUrl;
+    img.onload = () => resolve(img);
+    img.onerror = () => resolve(null);
+    img.src = url;
   });
+}
+
+// Slices the uploaded photo into one small cropped snippet per row (client-side canvas, using
+// the row1_y/lastrow_y anchors — either the decode response's rough AI estimate, or the user's
+// manually calibrated values) so each row's edit fields can show the matching piece of the real
+// coupon directly underneath.
+async function computeRowCrops(preview) {
+  const img = await loadImage(preview.imageUrl);
+  if (!img) return;
+  const n = preview.rows.length;
+  const { row1_y, lastrow_y } = preview.layout;
+  const rowHeight = n > 1 ? (lastrow_y - row1_y) / (n - 1) : 0.06;
+  preview.rows.forEach((row, i) => {
+    row.cropUrl = cropRowBand(img, row1_y + i * rowHeight, rowHeight);
+  });
+}
+
+// ── ROW-CROP CALIBRATION ──
+// The AI's row1_y/lastrow_y estimate is only ever a rough guess and small errors compound
+// across 13 rows (later rows visibly drift onto the next row's photo). Rather than chase a
+// perfect automated estimate again, this lets the user nudge two sliders once — with a live
+// single-row preview — until aligned, then reapplies to all 13 crops at once.
+let calibration = null;
+let calibrationImg = null;
+
+function initCalibration() {
+  const n = decodePreview.rows.length;
+  const rowHeight = n > 1 ? (decodePreview.layout.lastrow_y - decodePreview.layout.row1_y) / (n - 1) : 0.06;
+  calibration = { row1_y: decodePreview.layout.row1_y, rowHeight };
+  calibrationImg = null;
+  loadImage(decodePreview.imageUrl).then(img => { calibrationImg = img; updateCalibrationPreview(); });
+}
+function updateCalibrationPreview() {
+  const el = document.getElementById('calibrate-preview');
+  if (el && calibrationImg && calibration) el.src = cropRowBand(calibrationImg, calibration.row1_y, calibration.rowHeight);
+}
+function updateCalibration(field, value) {
+  if (!calibration) return;
+  calibration[field] = parseFloat(value);
+  updateCalibrationPreview();
+}
+async function applyCalibration() {
+  const n = decodePreview.rows.length;
+  decodePreview.layout = {
+    row1_y: calibration.row1_y,
+    lastrow_y: calibration.row1_y + calibration.rowHeight * (n - 1),
+  };
+  await computeRowCrops(decodePreview);
+  render();
+}
+
+function calibrationHtml(p) {
+  const c = calibration || { row1_y: p.layout.row1_y, rowHeight: (p.layout.lastrow_y - p.layout.row1_y) / Math.max(1, p.rows.length - 1) };
+  return `
+    <div class="calibrate-box">
+      <div class="calibrate-label">Om bildutklippen inte stämmer – justera tills exempelbilden visar rad 1</div>
+      <div class="calibrate-row">
+        <div class="calibrate-sliders">
+          <label>Startposition</label>
+          <input type="range" min="0" max="0.6" step="0.005" value="${c.row1_y}" oninput="updateCalibration('row1_y', this.value)">
+          <label>Radhöjd</label>
+          <input type="range" min="0.02" max="0.12" step="0.001" value="${c.rowHeight}" oninput="updateCalibration('rowHeight', this.value)">
+          <button class="btn btn-outline btn-sm" onclick="applyCalibration()">✓ Tillämpa på alla rader</button>
+        </div>
+        <img id="calibrate-preview" src="${p.rows[0]?.cropUrl || ''}" alt="Förhandsvisning rad 1" class="calibrate-preview-img">
+      </div>
+    </div>`;
 }
 
 function decodePreviewHtml() {
@@ -922,6 +991,7 @@ function decodePreviewHtml() {
       <label>Laddas upp av</label>
       <div style="font-size:14px;font-weight:600">👤 ${esc(p.uploaded_by || '')}</div>
     </div>
+    ${p.imageUrl ? calibrationHtml(p) : ''}
     <div style="margin-top:8px">${rowsHtml}</div>
     <div class="form-actions">
       <button class="btn btn-outline" onclick="cancelDecodePreview()">Avbryt</button>
@@ -944,6 +1014,8 @@ function togglePreviewPick(idx, sign) {
 function updatePreviewField(idx, field, value) { decodePreview.rows[idx][field] = value; }
 function releaseDecodePreviewImage() {
   if (decodePreview && decodePreview.imageUrl) URL.revokeObjectURL(decodePreview.imageUrl);
+  calibration = null;
+  calibrationImg = null;
 }
 function cancelDecodePreview() { releaseDecodePreviewImage(); decodePreview = null; render(); }
 async function confirmDecodePreview() {
