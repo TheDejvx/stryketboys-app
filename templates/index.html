@@ -44,9 +44,9 @@ body {
 /* ── HEADER ── */
 .app-header {
   background: var(--primary-dark);
-  padding: 0 16px;
+  padding: env(safe-area-inset-top, 0px) calc(16px + env(safe-area-inset-right, 0px)) 0 calc(16px + env(safe-area-inset-left, 0px));
   display: flex; align-items: center; justify-content: space-between;
-  height: 52px;
+  height: calc(52px + env(safe-area-inset-top, 0px));
   position: sticky; top: 0; z-index: 100;
   box-shadow: 0 2px 8px rgba(0,0,0,.3);
 }
@@ -70,7 +70,10 @@ body {
 .lock-btn.unlocked { border-color: rgba(144,238,144,.55); color: #90ee90; }
 
 /* ── PAGE ── */
-.page-content { padding: 14px 16px 32px; max-width: 900px; margin: 0 auto; }
+.page-content {
+  padding: 14px calc(16px + env(safe-area-inset-right, 0px)) calc(32px + env(safe-area-inset-bottom, 0px)) calc(16px + env(safe-area-inset-left, 0px));
+  max-width: 900px; margin: 0 auto;
+}
 
 /* ── TABS ── */
 .tab-bar { display: flex; gap: 6px; margin-bottom: 14px; }
@@ -263,7 +266,7 @@ body {
     <h1>⚽ StryketBoys</h1>
     <div class="header-right">
       <span class="save-status" id="save-status"></span>
-      <button class="lock-btn" id="lock-btn" onclick="toggleLock()">🔒 Lås upp</button>
+      <button class="lock-btn" id="lock-btn">🔒 Logga in</button>
     </div>
   </div>
 
@@ -360,84 +363,187 @@ body {
   </div>
 </div>
 
-<!-- UNLOCK MODAL -->
-<div class="modal-overlay" id="unlock-modal">
+<!-- LOGIN / CHANGE PASSWORD MODAL -->
+<div class="modal-overlay" id="login-modal">
   <div class="modal" style="max-width:320px">
     <div class="modal-header">
-      <h3>🔒 Lås upp redigering</h3>
-      <button class="btn-ghost" onclick="closeUnlockModal()">✕</button>
+      <h3 id="login-modal-title">🔒 Logga in</h3>
+      <button class="btn-ghost" id="login-close-btn" onclick="closeLoginModal()">✕</button>
     </div>
     <div class="modal-body">
-      <div class="form-row">
-        <label>Lösenord</label>
-        <input type="password" id="unlock-pw" placeholder="Lösenord" autocomplete="current-password">
+      <div id="login-step-login">
+        <div class="form-row">
+          <label>Användarnamn</label>
+          <input type="text" id="login-username" autocapitalize="none" autocomplete="username" placeholder="förnamn">
+        </div>
+        <div class="form-row">
+          <label>Lösenord</label>
+          <input type="password" id="login-password" autocomplete="current-password" placeholder="Lösenord">
+        </div>
+        <div class="auth-error" id="login-error">Fel användarnamn eller lösenord.</div>
       </div>
-      <div class="auth-error" id="unlock-error">Fel lösenord, försök igen.</div>
+      <div id="login-step-change" style="display:none">
+        <div style="font-size:12.5px;color:var(--muted);margin-bottom:12px">Första inloggningen – byt lösenord för att fortsätta.</div>
+        <div class="form-row">
+          <label>Nytt lösenord</label>
+          <input type="password" id="new-password" placeholder="Minst 4 tecken" autocomplete="new-password">
+        </div>
+        <div class="form-row">
+          <label>Bekräfta nytt lösenord</label>
+          <input type="password" id="new-password-confirm" placeholder="Upprepa lösenord" autocomplete="new-password">
+        </div>
+        <div class="auth-error" id="change-error"></div>
+      </div>
     </div>
-    <div class="modal-footer">
-      <button class="btn btn-outline" onclick="closeUnlockModal()">Avbryt</button>
-      <button class="btn btn-primary" onclick="submitUnlock()">Lås upp</button>
+    <div class="modal-footer" id="login-step-login-footer">
+      <button class="btn btn-outline" onclick="closeLoginModal()">Avbryt</button>
+      <button class="btn btn-primary" onclick="submitLogin()">Logga in</button>
+    </div>
+    <div class="modal-footer" id="login-step-change-footer" style="display:none">
+      <button class="btn btn-primary btn-block" onclick="submitChangePassword()">Byt lösenord och fortsätt</button>
     </div>
   </div>
 </div>
 
 <script>
-// ── AUTH ──
-const AUTH_KEY = 'stryk_auth';
-const AUTH_PW  = 'stryktips1337';
-const AUTH_TTL = 12 * 60 * 60 * 1000;
+// ── AUTH (per-user login) ──
+const SESSION_KEY = 'stryk_session';
+const SESSION_TTL = 30 * 24 * 60 * 60 * 1000; // 30 days
 let pendingAction = null;
+let loginStep = 'login'; // 'login' | 'change'
+let pendingLoginPassword = null;   // held in memory only, needed to confirm a forced password change
+let pendingSessionInfo = null;     // {username, display_name} while a forced change is in progress
 
-function checkAuth() {
+function getSession() {
   try {
-    const raw = localStorage.getItem(AUTH_KEY);
-    if (!raw) return false;
-    const { ts } = JSON.parse(raw);
-    return Date.now() - ts < AUTH_TTL;
-  } catch { return false; }
+    const raw = localStorage.getItem(SESSION_KEY);
+    if (!raw) return null;
+    const s = JSON.parse(raw);
+    if (Date.now() - s.ts > SESSION_TTL) return null;
+    return s;
+  } catch { return null; }
 }
-function setAuth()   { localStorage.setItem(AUTH_KEY, JSON.stringify({ ts: Date.now() })); }
-function clearAuth() { localStorage.removeItem(AUTH_KEY); }
+function setSession(username, display_name) {
+  localStorage.setItem(SESSION_KEY, JSON.stringify({ username, display_name, ts: Date.now() }));
+}
+function clearSession() { localStorage.removeItem(SESSION_KEY); }
+function checkAuth() { return !!getSession(); }
+
 function requireAuth(action) {
   if (checkAuth()) { action(); return; }
   pendingAction = action;
-  openUnlockModal();
+  openLoginModal();
 }
-function openUnlockModal() {
-  document.getElementById('unlock-pw').value = '';
-  document.getElementById('unlock-error').style.display = 'none';
-  document.getElementById('unlock-modal').classList.add('open');
-  setTimeout(() => document.getElementById('unlock-pw').focus(), 100);
+
+function openLoginModal() {
+  loginStep = 'login';
+  document.getElementById('login-username').value = '';
+  document.getElementById('login-password').value = '';
+  document.getElementById('login-error').style.display = 'none';
+  renderLoginModalStep();
+  document.getElementById('login-modal').classList.add('open');
+  setTimeout(() => document.getElementById('login-username').focus(), 100);
 }
-function closeUnlockModal() {
-  document.getElementById('unlock-modal').classList.remove('open');
+function closeLoginModal() {
+  if (loginStep === 'change') return; // forced change can't be dismissed
+  document.getElementById('login-modal').classList.remove('open');
   pendingAction = null;
+  pendingLoginPassword = null;
+  pendingSessionInfo = null;
 }
-function submitUnlock() {
-  const pw = document.getElementById('unlock-pw').value;
-  if (pw === AUTH_PW) {
-    setAuth(); updateAuthUI(); closeUnlockModal();
-    if (pendingAction) { pendingAction(); pendingAction = null; }
-  } else {
-    document.getElementById('unlock-error').style.display = 'block';
-    document.getElementById('unlock-pw').value = '';
-    document.getElementById('unlock-pw').focus();
+function renderLoginModalStep() {
+  document.getElementById('login-step-login').style.display = loginStep === 'login' ? '' : 'none';
+  document.getElementById('login-step-change').style.display = loginStep === 'change' ? '' : 'none';
+  document.getElementById('login-step-login-footer').style.display = loginStep === 'login' ? '' : 'none';
+  document.getElementById('login-step-change-footer').style.display = loginStep === 'change' ? '' : 'none';
+  document.getElementById('login-close-btn').style.display = loginStep === 'change' ? 'none' : '';
+  document.getElementById('login-modal-title').textContent = loginStep === 'change' ? '🔑 Byt lösenord' : '🔒 Logga in';
+}
+document.getElementById('login-username').addEventListener('keydown', e => { if (e.key === 'Enter') document.getElementById('login-password').focus(); });
+document.getElementById('login-password').addEventListener('keydown', e => { if (e.key === 'Enter') submitLogin(); });
+document.getElementById('new-password-confirm').addEventListener('keydown', e => { if (e.key === 'Enter') submitChangePassword(); });
+
+async function submitLogin() {
+  const username = document.getElementById('login-username').value.trim();
+  const password = document.getElementById('login-password').value;
+  const errEl = document.getElementById('login-error');
+  errEl.style.display = 'none';
+  try {
+    const r = await fetch('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username, password }) });
+    const data = await r.json();
+    if (data.status !== 'ok') {
+      errEl.textContent = data.message || 'Fel användarnamn eller lösenord.';
+      errEl.style.display = 'block';
+      return;
+    }
+    if (data.must_change_password) {
+      pendingLoginPassword = password;
+      pendingSessionInfo = { username: data.username, display_name: data.display_name };
+      loginStep = 'change';
+      document.getElementById('new-password').value = '';
+      document.getElementById('new-password-confirm').value = '';
+      document.getElementById('change-error').style.display = 'none';
+      renderLoginModalStep();
+      setTimeout(() => document.getElementById('new-password').focus(), 100);
+    } else {
+      setSession(data.username, data.display_name);
+      closeLoginModal();
+      updateAuthUI();
+      if (pendingAction) { pendingAction(); pendingAction = null; }
+      render();
+    }
+  } catch (e) {
+    errEl.textContent = 'Kunde inte logga in. Kontrollera nätverket.';
+    errEl.style.display = 'block';
   }
 }
-document.getElementById('unlock-pw').addEventListener('keydown', e => { if (e.key === 'Enter') submitUnlock(); });
-function toggleLock() {
-  if (checkAuth()) { clearAuth(); updateAuthUI(); render(); }
-  else { pendingAction = null; openUnlockModal(); }
+
+async function submitChangePassword() {
+  const newPw = document.getElementById('new-password').value;
+  const newPwConfirm = document.getElementById('new-password-confirm').value;
+  const errEl = document.getElementById('change-error');
+  errEl.style.display = 'none';
+  if (newPw.length < 4) { errEl.textContent = 'Minst 4 tecken.'; errEl.style.display = 'block'; return; }
+  if (newPw !== newPwConfirm) { errEl.textContent = 'Lösenorden matchar inte.'; errEl.style.display = 'block'; return; }
+  try {
+    const r = await fetch('/api/change-password', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: pendingSessionInfo.username, current_password: pendingLoginPassword, new_password: newPw }),
+    });
+    const data = await r.json();
+    if (data.status !== 'ok') { errEl.textContent = data.message || 'Kunde inte byta lösenord.'; errEl.style.display = 'block'; return; }
+    setSession(pendingSessionInfo.username, pendingSessionInfo.display_name);
+    pendingLoginPassword = null;
+    pendingSessionInfo = null;
+    loginStep = 'login';
+    document.getElementById('login-modal').classList.remove('open');
+    updateAuthUI();
+    if (pendingAction) { pendingAction(); pendingAction = null; }
+    render();
+  } catch (e) {
+    errEl.textContent = 'Kunde inte byta lösenord. Kontrollera nätverket.';
+    errEl.style.display = 'block';
+  }
 }
+
+function logout() { clearSession(); updateAuthUI(); render(); }
+
 function updateAuthUI() {
-  const authed = checkAuth();
+  const session = getSession();
   const btn = document.getElementById('lock-btn');
-  btn.textContent = authed ? '🔓 Upplåst' : '🔒 Lås upp';
-  btn.classList.toggle('unlocked', authed);
+  if (session) {
+    btn.textContent = `👤 ${session.display_name} · Logga ut`;
+    btn.classList.add('unlocked');
+    btn.onclick = logout;
+  } else {
+    btn.textContent = '🔒 Logga in';
+    btn.classList.remove('unlocked');
+    btn.onclick = () => requireAuth(() => {});
+  }
 }
 
 // ── STATE ──
-let state = { boys: [], weeks: [] };
+let state = { users: [], weeks: [] };
 let drawData = null;
 let drawUpdated = null;
 let decodePreview = null; // { system_type, rows, draw_number } while reviewing an upload, before save
@@ -539,9 +645,9 @@ function deriveResultSign(ev) {
   } catch { return null; }
 }
 function nextUploader() {
-  const boys = state.boys || [];
-  if (!boys.length) return '';
-  return boys[(state.weeks || []).length % boys.length];
+  const users = state.users || [];
+  if (!users.length) return '';
+  return users[(state.weeks || []).length % users.length].display_name;
 }
 function currentWeek() {
   if (!drawData) return null;
@@ -715,11 +821,12 @@ async function onCouponFileChosen() {
       if (statusEl) statusEl.textContent = 'Fel: ' + (data.message || 'okänt fel');
       return;
     }
+    const session = getSession();
     decodePreview = {
       system_type: data.system_type || 'Enkelrad',
       rows: data.rows || [],
       draw_number: data.draw_number ?? (drawData ? drawData.draw_number : null),
-      uploaded_by: nextUploader(),
+      uploaded_by: session ? session.display_name : nextUploader(),
     };
     render();
   } catch (e) {
@@ -752,10 +859,8 @@ function decodePreviewHtml() {
       <input id="preview-system-type" value="${esc(p.system_type)}" oninput="decodePreview.system_type=this.value">
     </div>
     <div class="form-row" style="padding:0 16px">
-      <label>Vem laddade upp?</label>
-      <select id="preview-uploaded-by" onchange="decodePreview.uploaded_by=this.value">
-        ${(state.boys || []).map(b => `<option value="${esc(b)}" ${b === p.uploaded_by ? 'selected' : ''}>${esc(b)}</option>`).join('')}
-      </select>
+      <label>Laddas upp av</label>
+      <div style="font-size:14px;font-weight:600">👤 ${esc(p.uploaded_by || '')}</div>
     </div>
     <div style="margin-top:8px">${rowsHtml}</div>
     <div class="form-actions">
@@ -830,7 +935,7 @@ function renderHistory() {
 // ── STATISTIK ──
 function computeBoyStats() {
   const stats = {};
-  (state.boys || []).forEach(b => stats[b] = { weeks: 0, correct: 0, total: 0 });
+  (state.users || []).forEach(u => stats[u.display_name] = { weeks: 0, correct: 0, total: 0 });
   (state.weeks || []).forEach(w => {
     const name = w.uploaded_by;
     if (!name) return;
@@ -869,10 +974,10 @@ function renderStats() {
   }).join('')}</div>`;
 }
 function renderPlayers() {
-  document.getElementById('player-grid').innerHTML = (state.boys || []).map(name => {
-    const s = computeBoyStats()[name] || { weeks: 0 };
+  document.getElementById('player-grid').innerHTML = (state.users || []).map(u => {
+    const s = computeBoyStats()[u.display_name] || { weeks: 0 };
     return `<div class="player-card">
-      <div class="name">${esc(name)}</div>
+      <div class="name">${esc(u.display_name)}</div>
       <div class="share">${s.weeks} kupong(er)</div>
     </div>`;
   }).join('');
@@ -902,7 +1007,7 @@ if ('serviceWorker' in navigator) {
 
 // ── CLOSE ON BACKDROP ──
 document.querySelectorAll('.modal-overlay').forEach(el => {
-  el.addEventListener('click', function(e) { if (e.target === this) closeUnlockModal(); });
+  el.addEventListener('click', function(e) { if (e.target === this) closeLoginModal(); });
 });
 
 // ── BOOT ──

@@ -2,6 +2,7 @@ from flask import Flask, render_template, jsonify, request
 import json, os, threading, time, base64
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
+from werkzeug.security import generate_password_hash, check_password_hash
 
 app = Flask(__name__)
 DATA_FILE = os.path.join(os.path.dirname(__file__), 'stryk_data.json')
@@ -44,6 +45,27 @@ def save_data(data):
     else:
         with open(DATA_FILE, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
+
+def find_user(data, username):
+    username = (username or '').strip().lower()
+    for u in data.get('users', []):
+        if u.get('username', '').lower() == username:
+            return u
+    return None
+
+def public_data(data):
+    """Strip password hashes before this ever reaches the client."""
+    return {
+        **data,
+        'users': [
+            {
+                'username': u.get('username'),
+                'display_name': u.get('display_name'),
+                'must_change_password': u.get('must_change_password', False),
+            }
+            for u in data.get('users', [])
+        ],
+    }
 
 
 # ── SVENSKA SPEL DRAW DATA ──
@@ -284,16 +306,54 @@ def index():
 
 @app.route('/api/data')
 def get_data():
-    return jsonify(load_data())
+    return jsonify(public_data(load_data()))
 
 @app.route('/api/save', methods=['POST'])
 def save():
     try:
         data = request.json
+        # never let a client-supplied blob overwrite stored password hashes —
+        # merge incoming users by username, keeping the existing hash unless
+        # /api/change-password explicitly updates it.
+        existing = load_data()
+        existing_users = {u['username']: u for u in existing.get('users', [])}
+        for u in data.get('users', []):
+            prior = existing_users.get(u.get('username'))
+            if prior and 'password_hash' not in u:
+                u['password_hash'] = prior['password_hash']
         save_data(data)
         return jsonify({'status': 'ok'})
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/api/login', methods=['POST'])
+def login():
+    payload = request.json or {}
+    data = load_data()
+    user = find_user(data, payload.get('username'))
+    if not user or not check_password_hash(user.get('password_hash', ''), payload.get('password', '')):
+        return jsonify({'status': 'error', 'message': 'Fel användarnamn eller lösenord'}), 401
+    return jsonify({
+        'status': 'ok',
+        'username': user['username'],
+        'display_name': user['display_name'],
+        'must_change_password': user.get('must_change_password', False),
+    })
+
+@app.route('/api/change-password', methods=['POST'])
+def change_password():
+    payload = request.json or {}
+    data = load_data()
+    user = find_user(data, payload.get('username'))
+    if not user or not check_password_hash(user.get('password_hash', ''), payload.get('current_password', '')):
+        return jsonify({'status': 'error', 'message': 'Fel nuvarande lösenord'}), 401
+    new_password = (payload.get('new_password') or '').strip()
+    if len(new_password) < 4:
+        return jsonify({'status': 'error', 'message': 'Nytt lösenord måste vara minst 4 tecken'}), 400
+    user['password_hash'] = generate_password_hash(new_password)
+    user['must_change_password'] = False
+    save_data(data)
+    return jsonify({'status': 'ok'})
 
 @app.route('/api/draw')
 def get_draw():

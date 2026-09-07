@@ -1,4 +1,41 @@
 {
-  "boys": ["Gustav", "Fabian", "David", "Tommy", "Olle", "Gabriel", "Martin Sel", "Johan", "Martin Steff", "Olof"],
+  "users": [
+    {
+      "username": "victor",
+      "display_name": "Victor Hagen",
+      "password_hash": "scrypt:32768:8:1$I0eSgvuoqxgkQslo$d9a7e98ffc9aee01bf8dead2ec71e660588f70bc97c60206319e67818a2fcef628df358342933f7bb201b2de00b58e837e2b10a63ba8bc5042141117be27b26f",
+      "must_change_password": true
+    },
+    {
+      "username": "tommy",
+      "display_name": "Tommy Selander",
+      "password_hash": "scrypt:32768:8:1$WZSOEXwW7H7Ym4xL$eb5690288909f1f964a5251c9e1a992a9ada4091f3969f7665154c8a9c6af6f14ff7ba0723487af138fb52ada719995493ad5bb3f2d5305af75a230aa7f1be26",
+      "must_change_password": true
+    },
+    {
+      "username": "david",
+      "display_name": "David Selander",
+      "password_hash": "scrypt:32768:8:1$DLwemotZt1cOrm2a$34f8d4172a7732ce9ee40e432b6b2f19d7917422aed106220c05f607185100bf76f93dfe8036ea61e95b2c8ce26f064267e1dce985c57dc729a552042e1b7eed",
+      "must_change_password": true
+    },
+    {
+      "username": "martin",
+      "display_name": "Martin Selander",
+      "password_hash": "scrypt:32768:8:1$MMcRQYYf8dShwYUJ$470e97f170518560fe766d60e8b37f0f697a04cc5c522dbed154144c7b593b50863985397d6311e411566ddf7393e890d60a7edc5ac642d6e1041262e52d4864",
+      "must_change_password": true
+    },
+    {
+      "username": "gustav",
+      "display_name": "Gustav Molander",
+      "password_hash": "scrypt:32768:8:1$8IJe8VA1xrX6nap0$f31af45b207d51cfcdbafc97be4247d614c21dff6cc78e8b28a065def89cb0bbb387558e47f06487041205eed88ac075abc35f7a4e2cd9309e5f9a414284e211",
+      "must_change_password": true
+    },
+    {
+      "username": "olle",
+      "display_name": "Olle Ahlén",
+      "password_hash": "scrypt:32768:8:1$LUL9HITkb3d94Y0o$9728d33491e2440fa69420786050e56cb899cd891b3d87990c98029b545281610a240f23690428fc38d834130a24604f52965e00f1f17d9ffb0ab97d548a8d37",
+      "must_change_password": true
+    }
+  ],
   "weeks": []
 }
