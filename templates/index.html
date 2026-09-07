@@ -728,7 +728,7 @@ function renderKupong() {
         ${authed ? `
           <div style="margin-top:14px">
             <input type="file" accept="image/*" id="coupon-file" style="display:none" onchange="onCouponFileChosen()">
-            <button class="btn btn-primary" onclick="document.getElementById('coupon-file').click()">📤 Ladda upp kupong</button>
+            <button class="btn btn-primary" id="upload-btn" onclick="document.getElementById('coupon-file').click()">📤 Ladda upp kupong</button>
           </div>
           <div id="upload-status" style="margin-top:10px;font-size:12px;color:var(--muted)"></div>
         ` : `<div style="margin-top:14px;font-size:12px">Lås upp för att ladda upp en kupong.</div>`}
@@ -824,7 +824,9 @@ async function onCouponFileChosen() {
   const file = input.files[0];
   if (!file) return;
   const statusEl = document.getElementById('upload-status');
-  if (statusEl) statusEl.textContent = 'Analyserar kupong...';
+  const btn = document.getElementById('upload-btn');
+  if (statusEl) statusEl.textContent = 'Analyserar kupong... (kan ta en stund)';
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Analyserar...'; }
 
   const formData = new FormData();
   formData.append('image', file);
@@ -834,6 +836,7 @@ async function onCouponFileChosen() {
     const data = await r.json();
     if (data.status !== 'ok') {
       if (statusEl) statusEl.textContent = 'Fel: ' + (data.message || 'okänt fel');
+      if (btn) { btn.disabled = false; btn.textContent = '📤 Ladda upp kupong'; }
       return;
     }
     const session = getSession();
@@ -846,6 +849,7 @@ async function onCouponFileChosen() {
     render();
   } catch (e) {
     if (statusEl) statusEl.textContent = 'Kunde inte analysera bilden.';
+    if (btn) { btn.disabled = false; btn.textContent = '📤 Ladda upp kupong'; }
     console.error(e);
   }
 }
