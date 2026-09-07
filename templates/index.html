@@ -1,0 +1,913 @@
+<!DOCTYPE html>
+<html lang="sv">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>StryketBoys</title>
+<link rel="manifest" href="/static/manifest.json">
+<meta name="theme-color" content="#081c30">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="StryketBoys">
+<link rel="apple-touch-icon" href="/static/icon-180.png">
+<link rel="icon" href="/static/icon-192.png">
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg: #0a2540;
+  --primary: #123a63;
+  --primary-dark: #081c30;
+  --text: #1a1a1a;
+  --white: #ffffff;
+  --light-bg: #f3f5f8;
+  --border: #e2e5e9;
+  --muted: #888;
+  --danger: #c0392b;
+  --win: #1e7e34;
+  --win-bg: #eafaf0;
+  --loss: #c0392b;
+  --loss-bg: #fdf0ef;
+  --live: #a6690a;
+  --live-bg: #fff4de;
+  --pending-bg: #eef0f2;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+  font-size: 15px;
+}
+
+/* ── HEADER ── */
+.app-header {
+  background: var(--primary-dark);
+  padding: 0 16px;
+  display: flex; align-items: center; justify-content: space-between;
+  height: 52px;
+  position: sticky; top: 0; z-index: 100;
+  box-shadow: 0 2px 8px rgba(0,0,0,.3);
+}
+.app-header h1 {
+  color: var(--white); font-size: 17px; font-weight: 700;
+  display: flex; align-items: center; gap: 8px;
+}
+.header-right { display: flex; align-items: center; gap: 10px; }
+.save-status { font-size: 12px; color: rgba(255,255,255,.7); }
+.save-status.saving { color: #ffd700; }
+.save-status.saved  { color: #90ee90; }
+
+/* ── LOCK BUTTON ── */
+.lock-btn {
+  background: transparent; border: 1.5px solid rgba(255,255,255,.35);
+  color: rgba(255,255,255,.75); border-radius: 8px;
+  padding: 5px 11px; font-size: 12px; font-weight: 600; cursor: pointer;
+  transition: all .15s; white-space: nowrap;
+}
+.lock-btn:hover { border-color: rgba(255,255,255,.8); color: var(--white); }
+.lock-btn.unlocked { border-color: rgba(144,238,144,.55); color: #90ee90; }
+
+/* ── PAGE ── */
+.page-content { padding: 14px 16px 32px; max-width: 900px; margin: 0 auto; }
+
+/* ── TABS ── */
+.tab-bar { display: flex; gap: 6px; margin-bottom: 14px; }
+.tab-btn {
+  flex: 1; background: rgba(255,255,255,.08); border: none; color: rgba(255,255,255,.7);
+  padding: 10px 8px; border-radius: 9px; font-size: 13px; font-weight: 700; cursor: pointer;
+  transition: all .15s; white-space: nowrap;
+}
+.tab-btn:hover { background: rgba(255,255,255,.14); }
+.tab-btn.active { background: var(--white); color: var(--primary-dark); }
+.tab-content { display: none; }
+.tab-content.active { display: block; }
+
+/* ── CARDS ── */
+.card {
+  background: var(--white); border-radius: 12px;
+  box-shadow: 0 2px 10px rgba(0,0,0,.08);
+  margin-bottom: 16px; overflow: hidden;
+}
+.card-header {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+}
+.card-header h2 { font-size: 14px; font-weight: 700; color: var(--primary-dark); }
+.card-body { padding: 16px; }
+
+/* ── SUMMARY BAR ── */
+.summary-bar {
+  background: var(--white); border-radius: 12px;
+  box-shadow: 0 2px 10px rgba(0,0,0,.08);
+  display: grid; grid-template-columns: repeat(3, 1fr);
+  margin-bottom: 16px; overflow: hidden;
+}
+.summary-item { padding: 13px 10px; text-align: center; border-right: 1px solid var(--border); }
+.summary-item:last-child { border-right: none; }
+.summary-item .label { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; margin-bottom: 3px; }
+.summary-item .value { font-size: 19px; font-weight: 700; color: var(--primary-dark); }
+.summary-item .value.positive { color: var(--win); }
+.summary-item .value.negative { color: var(--loss); }
+
+/* ── DRAW META ── */
+.draw-meta { display: flex; justify-content: space-between; align-items: center; padding: 10px 16px; font-size: 12px; color: var(--muted); border-bottom: 1px solid var(--border); flex-wrap: wrap; gap: 6px; }
+.draw-meta b { color: var(--text); }
+
+/* ── MATCH ROWS ── */
+.match-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 10px 14px; border-bottom: 1px solid var(--border);
+}
+.match-row:last-child { border-bottom: none; }
+.match-row.low-conf { background: #fff8e1; }
+.match-row-left { min-width: 0; flex: 1; }
+.match-row-num { font-size: 10px; color: var(--muted); font-weight: 700; }
+.match-teams { font-weight: 600; font-size: 13.5px; line-height: 1.3; }
+.match-meta { font-size: 11px; color: var(--muted); margin-top: 2px; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.match-row-right { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+.match-pills { display: flex; gap: 4px; }
+
+.pick-pill {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 28px; height: 25px; border-radius: 7px; font-size: 12px; font-weight: 700;
+  border: 1.5px solid var(--border); background: var(--white); color: var(--text);
+  user-select: none;
+}
+.pick-pill.editable { cursor: pointer; }
+.pick-pill.selected { background: var(--primary); border-color: var(--primary); color: var(--white); }
+.pick-pill.correct { background: var(--win); border-color: var(--win); color: var(--white); }
+.pick-pill.incorrect { background: var(--loss); border-color: var(--loss); color: var(--white); }
+
+.match-badge { font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 10px; white-space: nowrap; }
+.badge-live { background: var(--live-bg); color: var(--live); }
+.badge-correct { background: var(--win-bg); color: var(--win); }
+.badge-incorrect { background: var(--loss-bg); color: var(--loss); }
+.badge-pending { background: var(--pending-bg); color: var(--muted); }
+.low-conf-flag { font-size: 10px; color: #a6690a; font-weight: 700; }
+
+/* ── UPLOAD ── */
+.upload-zone {
+  border: 2px dashed var(--border); border-radius: 12px; padding: 26px 16px;
+  text-align: center; color: var(--muted); font-size: 13px;
+}
+.upload-zone .icon { font-size: 30px; margin-bottom: 8px; }
+.upload-preview { display: flex; align-items: center; gap: 10px; padding: 12px 16px; }
+.upload-preview img { width: 52px; height: 52px; object-fit: cover; border-radius: 8px; border: 1px solid var(--border); }
+.upload-preview-info { flex: 1; font-size: 12px; color: var(--muted); }
+
+/* ── EDIT ROW (decode preview) ── */
+.edit-row { padding: 10px 14px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 8px; }
+.edit-row:last-child { border-bottom: none; }
+.edit-row-num { font-size: 11px; color: var(--muted); font-weight: 700; width: 18px; }
+.edit-row-teams { flex: 1; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.edit-row-teams input {
+  border: 1px solid var(--border); border-radius: 6px; padding: 5px 7px; font-size: 12.5px;
+  outline: none; background: var(--white); color: var(--text);
+}
+.edit-row-teams input:focus { border-color: var(--primary); }
+
+/* ── TABLE / WRAP ── */
+.table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.loading-row { text-align: center; padding: 28px 16px; color: var(--muted); font-size: 13px; }
+.no-data { text-align: center; padding: 28px 16px; color: var(--muted); }
+.no-data .icon { font-size: 36px; margin-bottom: 8px; }
+
+/* ── BUTTONS ── */
+.btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 9px 16px; border-radius: 8px; border: none;
+  font-size: 14px; font-weight: 600; cursor: pointer;
+  transition: all .15s; white-space: nowrap;
+}
+.btn-primary { background: var(--primary); color: var(--white); }
+.btn-primary:hover { background: var(--primary-dark); }
+.btn-primary:disabled { opacity: .5; cursor: not-allowed; }
+.btn-sm { padding: 5px 10px; font-size: 12px; border-radius: 6px; }
+.btn-outline { background: transparent; color: var(--primary); border: 1.5px solid var(--primary); }
+.btn-outline:hover { background: var(--primary); color: var(--white); }
+.btn-ghost { background: transparent; color: var(--muted); border: none; padding: 4px 6px; cursor: pointer; }
+.btn-ghost:hover { color: var(--danger); }
+.btn-block { width: 100%; justify-content: center; }
+
+/* ── FORM ── */
+.form-row { margin-bottom: 14px; }
+.form-row label { display: block; font-size: 11px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .4px; margin-bottom: 5px; }
+.form-row input, .form-row select {
+  width: 100%; padding: 10px 12px; border: 1.5px solid var(--border);
+  border-radius: 8px; font-size: 14px; outline: none;
+  background: var(--white); color: var(--text); transition: border-color .15s;
+}
+.form-row input:focus, .form-row select:focus { border-color: var(--primary); }
+.form-actions { display: flex; gap: 10px; padding: 14px 16px; border-top: 1px solid var(--border); }
+.form-actions .btn { flex: 1; }
+
+/* ── MODAL ── */
+.modal-overlay {
+  position: fixed; inset: 0; background: rgba(0,0,0,.5);
+  display: none; align-items: center; justify-content: center;
+  z-index: 500; padding: 16px;
+}
+.modal-overlay.open { display: flex; }
+.modal {
+  background: var(--white); border-radius: 16px;
+  width: 100%; max-width: 340px; box-shadow: 0 16px 60px rgba(0,0,0,.35);
+  overflow: hidden;
+}
+.modal-header { padding: 15px 20px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
+.modal-header h3 { font-size: 16px; font-weight: 700; color: var(--primary-dark); }
+.modal-body { padding: 20px; }
+.modal-footer { padding: 13px 20px; border-top: 1px solid var(--border); display: flex; gap: 10px; justify-content: flex-end; }
+.auth-error { color: var(--danger); font-size: 13px; margin-top: 8px; display: none; }
+
+/* ── HISTORIK / STATISTIK ── */
+.week-card-header { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; cursor: pointer; }
+.week-card-title { font-weight: 700; font-size: 13.5px; }
+.week-card-sub { font-size: 11px; color: var(--muted); margin-top: 2px; }
+.week-tally { font-size: 13px; font-weight: 700; color: var(--primary-dark); }
+
+.stats-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+@media (min-width: 480px) { .stats-grid { grid-template-columns: repeat(3, 1fr); } }
+.stat-card { background: var(--light-bg); border-radius: 10px; padding: 13px 10px; text-align: center; }
+.stat-label { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .4px; margin-bottom: 5px; }
+.stat-value { font-size: 17px; font-weight: 700; color: var(--primary-dark); }
+
+.player-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; }
+.player-card { background: var(--light-bg); border-radius: 10px; padding: 13px 10px; text-align: center; }
+.player-card .name { font-weight: 700; font-size: 13px; margin-bottom: 4px; }
+.player-card .share { font-size: 17px; font-weight: 700; color: var(--primary-dark); }
+.player-card .pnl { font-size: 12px; margin-top: 2px; color: var(--muted); }
+
+/* ── INSTALL CARD ── */
+.install-card { background: var(--primary-dark); border-radius: 12px; padding: 16px; margin-bottom: 16px; color: var(--white); }
+.install-card h3 { font-size: 13px; font-weight: 700; margin-bottom: 12px; opacity: .85; letter-spacing: .3px; }
+.install-steps { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+@media (max-width: 480px) { .install-steps { grid-template-columns: 1fr; } }
+.install-platform { background: rgba(255,255,255,.08); border-radius: 8px; padding: 12px 14px; }
+.install-platform .plat-name { font-size: 12px; font-weight: 700; margin-bottom: 8px; opacity: .7; text-transform: uppercase; letter-spacing: .5px; }
+.install-platform ol { padding-left: 16px; font-size: 13px; line-height: 1.7; opacity: .9; }
+.install-android-btn { margin-top: 10px; }
+
+@media (max-width: 480px) {
+  .summary-item .value { font-size: 15px; }
+  .summary-item .label { font-size: 9px; }
+}
+</style>
+</head>
+<body>
+
+<div id="app">
+  <div class="app-header">
+    <h1>⚽ StryketBoys</h1>
+    <div class="header-right">
+      <span class="save-status" id="save-status"></span>
+      <button class="lock-btn" id="lock-btn" onclick="toggleLock()">🔒 Lås upp</button>
+    </div>
+  </div>
+
+  <div class="page-content">
+
+    <div class="tab-bar">
+      <button class="tab-btn active" id="tab-btn-kupong" onclick="switchTab('kupong')">🎟️ Kupong</button>
+      <button class="tab-btn" id="tab-btn-historik" onclick="switchTab('historik')">📜 Historik</button>
+      <button class="tab-btn" id="tab-btn-statistik" onclick="switchTab('statistik')">📈 Statistik</button>
+    </div>
+
+    <!-- KUPONG -->
+    <div class="tab-content active" id="tab-kupong">
+
+      <div class="summary-bar" id="tally-bar" style="display:none">
+        <div class="summary-item">
+          <div class="label">Rätt</div>
+          <div class="value positive" id="tally-correct">–</div>
+        </div>
+        <div class="summary-item">
+          <div class="label">Fel</div>
+          <div class="value negative" id="tally-wrong">–</div>
+        </div>
+        <div class="summary-item">
+          <div class="label">Kvar</div>
+          <div class="value" id="tally-pending">–</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <h2 id="kupong-title">🎟️ Denna veckans kupong</h2>
+          <span class="matches-meta" id="draw-updated"></span>
+        </div>
+        <div class="draw-meta" id="draw-meta"></div>
+        <div id="kupong-body">
+          <div class="loading-row">Laddar...</div>
+        </div>
+      </div>
+
+      <div class="install-card">
+        <h3>📲 Lägg till som app på hemskärmen</h3>
+        <div class="install-steps">
+          <div class="install-platform">
+            <div class="plat-name">Android (Chrome)</div>
+            <ol>
+              <li>Tryck på <i>⋮</i> menyn uppe till höger, välj <strong>Installera app</strong></li>
+              <li>Eller tryck knappen nedan om den syns</li>
+            </ol>
+            <button class="btn btn-outline btn-sm install-android-btn" id="android-install-btn" style="display:none" onclick="installApp()">Installera StryketBoys</button>
+          </div>
+          <div class="install-platform">
+            <div class="plat-name">iPhone (Safari)</div>
+            <ol>
+              <li>Tryck på dela-ikonen <i>⬆</i> längst ner</li>
+              <li>Välj <strong>Lägg till på hemskärmen</strong></li>
+              <li>Tryck <strong>Lägg till</strong></li>
+            </ol>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- HISTORIK -->
+    <div class="tab-content" id="tab-historik">
+      <div class="card">
+        <div class="card-header">
+          <h2>📜 Alla veckor</h2>
+          <span class="matches-meta" id="history-count"></span>
+        </div>
+        <div id="history-body">
+          <div class="loading-row">Laddar...</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- STATISTIK -->
+    <div class="tab-content" id="tab-statistik">
+      <div class="card">
+        <div class="card-header"><h2>📈 Statistik per gubbe</h2></div>
+        <div class="card-body" id="stats-body">
+          <div class="loading-row">Laddar...</div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-header"><h2>👥 Gubbar</h2></div>
+        <div class="card-body">
+          <div class="player-grid" id="player-grid"></div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- UNLOCK MODAL -->
+<div class="modal-overlay" id="unlock-modal">
+  <div class="modal" style="max-width:320px">
+    <div class="modal-header">
+      <h3>🔒 Lås upp redigering</h3>
+      <button class="btn-ghost" onclick="closeUnlockModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-row">
+        <label>Lösenord</label>
+        <input type="password" id="unlock-pw" placeholder="Lösenord" autocomplete="current-password">
+      </div>
+      <div class="auth-error" id="unlock-error">Fel lösenord, försök igen.</div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-outline" onclick="closeUnlockModal()">Avbryt</button>
+      <button class="btn btn-primary" onclick="submitUnlock()">Lås upp</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── AUTH ──
+const AUTH_KEY = 'stryk_auth';
+const AUTH_PW  = 'stryktips1337';
+const AUTH_TTL = 12 * 60 * 60 * 1000;
+let pendingAction = null;
+
+function checkAuth() {
+  try {
+    const raw = localStorage.getItem(AUTH_KEY);
+    if (!raw) return false;
+    const { ts } = JSON.parse(raw);
+    return Date.now() - ts < AUTH_TTL;
+  } catch { return false; }
+}
+function setAuth()   { localStorage.setItem(AUTH_KEY, JSON.stringify({ ts: Date.now() })); }
+function clearAuth() { localStorage.removeItem(AUTH_KEY); }
+function requireAuth(action) {
+  if (checkAuth()) { action(); return; }
+  pendingAction = action;
+  openUnlockModal();
+}
+function openUnlockModal() {
+  document.getElementById('unlock-pw').value = '';
+  document.getElementById('unlock-error').style.display = 'none';
+  document.getElementById('unlock-modal').classList.add('open');
+  setTimeout(() => document.getElementById('unlock-pw').focus(), 100);
+}
+function closeUnlockModal() {
+  document.getElementById('unlock-modal').classList.remove('open');
+  pendingAction = null;
+}
+function submitUnlock() {
+  const pw = document.getElementById('unlock-pw').value;
+  if (pw === AUTH_PW) {
+    setAuth(); updateAuthUI(); closeUnlockModal();
+    if (pendingAction) { pendingAction(); pendingAction = null; }
+  } else {
+    document.getElementById('unlock-error').style.display = 'block';
+    document.getElementById('unlock-pw').value = '';
+    document.getElementById('unlock-pw').focus();
+  }
+}
+document.getElementById('unlock-pw').addEventListener('keydown', e => { if (e.key === 'Enter') submitUnlock(); });
+function toggleLock() {
+  if (checkAuth()) { clearAuth(); updateAuthUI(); render(); }
+  else { pendingAction = null; openUnlockModal(); }
+}
+function updateAuthUI() {
+  const authed = checkAuth();
+  const btn = document.getElementById('lock-btn');
+  btn.textContent = authed ? '🔓 Upplåst' : '🔒 Lås upp';
+  btn.classList.toggle('unlocked', authed);
+}
+
+// ── STATE ──
+let state = { boys: [], weeks: [] };
+let drawData = null;
+let drawUpdated = null;
+let decodePreview = null; // { system_type, rows, draw_number } while reviewing an upload, before save
+let saveTimer = null;
+
+// ── INIT ──
+async function init() {
+  await loadData();
+  await loadDraw();
+}
+async function loadData() {
+  try {
+    const r = await fetch('/api/data');
+    state = await r.json();
+  } catch (e) { console.error('loadData', e); }
+  render();
+}
+async function saveData() {
+  setSaveStatus('saving');
+  try {
+    await fetch('/api/save', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(state) });
+    setSaveStatus('saved');
+    setTimeout(() => setSaveStatus(''), 2000);
+  } catch (e) {
+    setSaveStatus('');
+    alert('Kunde inte spara. Kontrollera nätverket.');
+  }
+}
+function saveDataDebounced() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(saveData, 800);
+}
+function setSaveStatus(s) {
+  const el = document.getElementById('save-status');
+  el.className = 'save-status ' + s;
+  el.textContent = s === 'saving' ? 'Sparar...' : s === 'saved' ? 'Sparat ✓' : '';
+}
+
+async function loadDraw() {
+  try {
+    const r = await fetch('/api/draw');
+    const data = await r.json();
+    drawData = data.draw;
+    drawUpdated = data.last_updated;
+  } catch (e) { console.error('loadDraw', e); }
+  render();
+}
+async function refreshDraw() {
+  try {
+    const r = await fetch('/api/refresh-draw', { method: 'POST' });
+    const data = await r.json();
+    drawData = data.draw;
+    drawUpdated = data.last_updated;
+  } catch (e) { console.error(e); }
+  render();
+}
+
+// ── HELPERS ──
+function esc(s) { return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function findEvent(matchId) { return (drawData?.events || []).find(e => e.match_id === matchId) || null; }
+function fmtKickoff(iso) {
+  if (!iso) return '';
+  try {
+    return new Date(iso).toLocaleString('sv-SE', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Stockholm' });
+  } catch { return iso; }
+}
+function isFinished(ev) {
+  if (!ev) return false;
+  const s = (ev.sport_event_status || '').toLowerCase();
+  const st = (ev.status || '').toLowerCase();
+  return /end|finish|final/.test(s) || /avslutad|slut/.test(st);
+}
+function isLive(ev) {
+  if (!ev || isFinished(ev)) return false;
+  const s = (ev.sport_event_status || '').toLowerCase();
+  const st = (ev.status || '').toLowerCase();
+  return /live|progress|started|half/.test(s) || /pågår|paus/.test(st);
+}
+// Best-effort derivation of the final 1/X/2 sign from the API's `result` field.
+// Schema is unverified against a real live match — falls back to null (manual entry) if unrecognized.
+function deriveResultSign(ev) {
+  const res = ev && ev.result;
+  if (!res) return null;
+  try {
+    let entry = null;
+    if (Array.isArray(res)) {
+      if (!res.length) return null;
+      entry = res.find(r => /full ?time|match|ft/i.test(r.type || r.period || '')) || res[res.length - 1];
+    } else if (typeof res === 'object') {
+      entry = res;
+    }
+    if (!entry) return null;
+    const h = entry.homeScore ?? entry.home ?? entry.homeGoals ?? entry.h;
+    const a = entry.awayScore ?? entry.away ?? entry.awayGoals ?? entry.a;
+    if (h == null || a == null) return null;
+    if (Number(h) > Number(a)) return '1';
+    if (Number(h) < Number(a)) return '2';
+    return 'X';
+  } catch { return null; }
+}
+function nextUploader() {
+  const boys = state.boys || [];
+  if (!boys.length) return '';
+  return boys[(state.weeks || []).length % boys.length];
+}
+function currentWeek() {
+  if (!drawData) return null;
+  return (state.weeks || []).find(w => w.draw_number === drawData.draw_number) || null;
+}
+
+// ── TABS ──
+function switchTab(name) {
+  document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+  document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+  document.getElementById('tab-btn-' + name).classList.add('active');
+}
+
+// ── RENDER ──
+function render() {
+  updateAuthUI();
+  renderDrawMeta();
+  renderKupong();
+  renderHistory();
+  renderStats();
+  renderPlayers();
+}
+
+function renderDrawMeta() {
+  const el = document.getElementById('draw-meta');
+  const upd = document.getElementById('draw-updated');
+  if (!drawData) { el.innerHTML = ''; return; }
+  const closeTime = drawData.reg_close_time ? new Date(drawData.reg_close_time).toLocaleString('sv-SE', { day:'numeric', month:'short', hour:'2-digit', minute:'2-digit', timeZone:'Europe/Stockholm' }) : '–';
+  const pot = drawData.current_net_sale ? Number(drawData.current_net_sale.replace(/\s/g,'').replace(',', '.')).toLocaleString('sv-SE') + ' kr' : '–';
+  el.innerHTML = `<span>Omgång <b>${drawData.draw_number ?? '–'}</b></span><span>Stänger <b>${closeTime}</b></span><span>Pott <b>${pot}</b></span>`;
+  if (drawUpdated) {
+    const d = new Date(drawUpdated);
+    upd.textContent = 'Uppdaterad ' + d.toLocaleTimeString('sv-SE', { hour: '2-digit', minute: '2-digit' });
+  }
+}
+
+function renderKupong() {
+  const body = document.getElementById('kupong-body');
+  const tallyBar = document.getElementById('tally-bar');
+
+  if (decodePreview) {
+    tallyBar.style.display = 'none';
+    body.innerHTML = decodePreviewHtml();
+    return;
+  }
+
+  if (!drawData) {
+    tallyBar.style.display = 'none';
+    body.innerHTML = `<div class="loading-row">Hämtar aktuell omgång...</div>`;
+    return;
+  }
+
+  const week = currentWeek();
+  if (!week) {
+    tallyBar.style.display = 'none';
+    const authed = checkAuth();
+    const suggestion = nextUploader();
+    body.innerHTML = `
+      <div class="upload-zone">
+        <div class="icon">📸</div>
+        <div>Ingen kupong uppladdad för omgång ${drawData.draw_number ?? '–'} än.</div>
+        ${suggestion ? `<div style="margin-top:6px;font-size:12px">Näst på tur: <b>${esc(suggestion)}</b></div>` : ''}
+        ${authed ? `
+          <div style="margin-top:14px">
+            <input type="file" accept="image/*" capture="environment" id="coupon-file" style="display:none" onchange="onCouponFileChosen()">
+            <button class="btn btn-primary" onclick="document.getElementById('coupon-file').click()">📤 Ladda upp kupong</button>
+          </div>
+          <div id="upload-status" style="margin-top:10px;font-size:12px;color:var(--muted)"></div>
+        ` : `<div style="margin-top:14px;font-size:12px">Lås upp för att ladda upp en kupong.</div>`}
+      </div>`;
+    return;
+  }
+
+  // Render current saved week's rows, cross-referenced against live draw data
+  let correct = 0, wrong = 0, pending = 0;
+  let changed = false;
+
+  const rowsHtml = (week.rows || []).map(row => {
+    const ev = findEvent(row.match_id);
+    const finished = isFinished(ev);
+    const live = isLive(ev);
+
+    if (finished && !row.settled_result) {
+      const auto = deriveResultSign(ev);
+      if (auto) { row.settled_result = auto; changed = true; }
+    }
+
+    let badge = `<span class="match-badge badge-pending">Ej startad</span>`;
+    if (live) badge = `<span class="match-badge badge-live">🔴 Pågår</span>`;
+    if (finished) {
+      if (row.settled_result) {
+        const hit = (row.picks || []).includes(row.settled_result);
+        badge = hit ? `<span class="match-badge badge-correct">✓ Rätt</span>` : `<span class="match-badge badge-incorrect">✗ Fel</span>`;
+        if (hit) correct++; else wrong++;
+      } else {
+        badge = `<span class="match-badge badge-pending">Slutspelad – ange resultat</span>`;
+        pending++;
+      }
+    } else {
+      pending++;
+    }
+
+    const pillsHtml = ['1', 'X', '2'].map(sign => {
+      const selected = (row.picks || []).includes(sign);
+      let cls = 'pick-pill';
+      if (finished && row.settled_result) {
+        if (selected && sign === row.settled_result) cls += ' correct';
+        else if (selected) cls += ' incorrect';
+      } else if (selected) cls += ' selected';
+      return `<span class="${cls}">${sign}</span>`;
+    }).join('');
+
+    const manualPicker = (finished && !row.settled_result) ? `
+      <div class="match-pills" style="margin-top:4px">
+        ${['1','X','2'].map(s => `<span class="pick-pill editable" onclick="setManualResult(${row.row_num},'${s}')">${s}</span>`).join('')}
+      </div>` : '';
+
+    return `<div class="match-row">
+      <div class="match-row-left">
+        <div class="match-row-num">#${row.row_num}</div>
+        <div class="match-teams">${esc(row.home)} - ${esc(row.away)}</div>
+        <div class="match-meta">${esc(row.kickoff_time || '')}</div>
+      </div>
+      <div class="match-row-right">
+        ${badge}
+        <div class="match-pills">${pillsHtml}</div>
+        ${manualPicker}
+      </div>
+    </div>`;
+  }).join('');
+
+  document.getElementById('kupong-title').textContent = `🎟️ Kupong v${drawData.draw_number ?? ''} – ${esc(week.uploaded_by || '')}`;
+  tallyBar.style.display = '';
+  document.getElementById('tally-correct').textContent = correct;
+  document.getElementById('tally-wrong').textContent = wrong;
+  document.getElementById('tally-pending').textContent = pending;
+
+  body.innerHTML = `<div class="matches-meta" style="padding:8px 16px;color:var(--muted);font-size:11px">${esc(week.system_type || 'Enkelrad')}</div>` + rowsHtml;
+
+  if (changed) saveDataDebounced();
+}
+
+function setManualResult(rowNum, sign) {
+  requireAuth(() => {
+    const week = currentWeek();
+    if (!week) return;
+    const row = (week.rows || []).find(r => r.row_num === rowNum);
+    if (!row) return;
+    row.settled_result = sign;
+    render();
+    saveDataDebounced();
+  });
+}
+
+// ── COUPON UPLOAD / DECODE ──
+async function onCouponFileChosen() {
+  const input = document.getElementById('coupon-file');
+  const file = input.files[0];
+  if (!file) return;
+  const statusEl = document.getElementById('upload-status');
+  if (statusEl) statusEl.textContent = 'Analyserar kupong...';
+
+  const formData = new FormData();
+  formData.append('image', file);
+
+  try {
+    const r = await fetch('/api/coupon/decode', { method: 'POST', body: formData });
+    const data = await r.json();
+    if (data.status !== 'ok') {
+      if (statusEl) statusEl.textContent = 'Fel: ' + (data.message || 'okänt fel');
+      return;
+    }
+    decodePreview = {
+      system_type: data.system_type || 'Enkelrad',
+      rows: data.rows || [],
+      draw_number: data.draw_number ?? (drawData ? drawData.draw_number : null),
+      uploaded_by: nextUploader(),
+    };
+    render();
+  } catch (e) {
+    if (statusEl) statusEl.textContent = 'Kunde inte analysera bilden.';
+    console.error(e);
+  }
+}
+
+function decodePreviewHtml() {
+  const p = decodePreview;
+  const rowsHtml = p.rows.map((row, idx) => {
+    const pillsHtml = ['1', 'X', '2'].map(sign => {
+      const selected = (row.picks || []).includes(sign);
+      return `<span class="pick-pill editable${selected ? ' selected' : ''}" onclick="togglePreviewPick(${idx},'${sign}')">${sign}</span>`;
+    }).join('');
+    return `<div class="edit-row${row.low_confidence ? ' low-conf' : ''}">
+      <div class="edit-row-num">#${row.row_num ?? idx + 1}</div>
+      <div class="edit-row-teams">
+        <input value="${esc(row.home)}" oninput="updatePreviewField(${idx},'home',this.value)" placeholder="Hemmalag">
+        <input value="${esc(row.away)}" oninput="updatePreviewField(${idx},'away',this.value)" placeholder="Bortalag">
+        ${row.low_confidence ? '<span class="low-conf-flag">⚠ Matcha inte mot spelschemat – kontrollera</span>' : ''}
+      </div>
+      <div class="match-pills">${pillsHtml}</div>
+    </div>`;
+  }).join('');
+
+  return `
+    <div class="form-row" style="padding:14px 16px 0">
+      <label>Systemtyp</label>
+      <input id="preview-system-type" value="${esc(p.system_type)}" oninput="decodePreview.system_type=this.value">
+    </div>
+    <div class="form-row" style="padding:0 16px">
+      <label>Vem laddade upp?</label>
+      <select id="preview-uploaded-by" onchange="decodePreview.uploaded_by=this.value">
+        ${(state.boys || []).map(b => `<option value="${esc(b)}" ${b === p.uploaded_by ? 'selected' : ''}>${esc(b)}</option>`).join('')}
+      </select>
+    </div>
+    <div style="margin-top:8px">${rowsHtml}</div>
+    <div class="form-actions">
+      <button class="btn btn-outline" onclick="cancelDecodePreview()">Avbryt</button>
+      <button class="btn btn-primary" onclick="confirmDecodePreview()">✓ Spara kupong</button>
+    </div>`;
+}
+function togglePreviewPick(idx, sign) {
+  const row = decodePreview.rows[idx];
+  const i = row.picks.indexOf(sign);
+  if (i === -1) row.picks.push(sign); else row.picks.splice(i, 1);
+  if (!row.picks.length) row.picks.push(sign); // never allow zero picks
+  render();
+}
+function updatePreviewField(idx, field, value) { decodePreview.rows[idx][field] = value; }
+function cancelDecodePreview() { decodePreview = null; render(); }
+async function confirmDecodePreview() {
+  const payload = {
+    draw_number: decodePreview.draw_number,
+    uploaded_by: decodePreview.uploaded_by,
+    system_type: decodePreview.system_type,
+    rows: decodePreview.rows.map(r => ({
+      row_num: r.row_num, home: r.home, away: r.away, kickoff_time: r.kickoff_time,
+      match_id: r.match_id, match_start: r.match_start, picks: r.picks, settled_result: null,
+    })),
+  };
+  try {
+    const r = await fetch('/api/coupon/save', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    const data = await r.json();
+    if (data.status === 'ok') {
+      state.weeks = state.weeks || [];
+      const idx = state.weeks.findIndex(w => w.id === data.week.id);
+      if (idx !== -1) state.weeks[idx] = data.week; else state.weeks.push(data.week);
+      decodePreview = null;
+      render();
+    } else {
+      alert('Kunde inte spara: ' + (data.message || 'okänt fel'));
+    }
+  } catch (e) {
+    alert('Kunde inte spara kupongen.');
+    console.error(e);
+  }
+}
+
+// ── HISTORIK ──
+function weekTally(week) {
+  let correct = 0, total = 0;
+  (week.rows || []).forEach(r => { if (r.settled_result) { total++; if ((r.picks || []).includes(r.settled_result)) correct++; } });
+  return { correct, total };
+}
+function renderHistory() {
+  const body = document.getElementById('history-body');
+  const weeks = [...(state.weeks || [])].reverse();
+  document.getElementById('history-count').textContent = weeks.length ? `${weeks.length} st` : '';
+  if (!weeks.length) {
+    body.innerHTML = `<div class="no-data"><div class="icon">📜</div><div>Inga kuponger sparade än.</div></div>`;
+    return;
+  }
+  body.innerHTML = weeks.map(w => {
+    const { correct, total } = weekTally(w);
+    const tallyStr = total ? `${correct}/${total} rätt` : 'Ej avgjord';
+    return `<div class="week-card-header">
+      <div>
+        <div class="week-card-title">Omgång ${w.draw_number ?? '–'}</div>
+        <div class="week-card-sub">${esc(w.uploaded_by || '')} · ${esc(w.system_type || 'Enkelrad')}</div>
+      </div>
+      <div class="week-tally">${tallyStr}</div>
+    </div>`;
+  }).join('');
+}
+
+// ── STATISTIK ──
+function computeBoyStats() {
+  const stats = {};
+  (state.boys || []).forEach(b => stats[b] = { weeks: 0, correct: 0, total: 0 });
+  (state.weeks || []).forEach(w => {
+    const name = w.uploaded_by;
+    if (!name) return;
+    if (!stats[name]) stats[name] = { weeks: 0, correct: 0, total: 0 };
+    stats[name].weeks++;
+    (w.rows || []).forEach(r => {
+      if (r.settled_result) {
+        stats[name].total++;
+        if ((r.picks || []).includes(r.settled_result)) stats[name].correct++;
+      }
+    });
+  });
+  return stats;
+}
+function renderStats() {
+  const body = document.getElementById('stats-body');
+  const stats = computeBoyStats();
+  const names = Object.keys(stats).filter(n => stats[n].weeks > 0);
+  if (!names.length) {
+    body.innerHTML = `<div class="no-data"><div class="icon">📈</div><div>Ingen statistik tillgänglig än.</div></div>`;
+    return;
+  }
+  names.sort((a, b) => {
+    const pa = stats[a].total ? stats[a].correct / stats[a].total : 0;
+    const pb = stats[b].total ? stats[b].correct / stats[b].total : 0;
+    return pb - pa;
+  });
+  body.innerHTML = `<div class="stats-grid">${names.map(n => {
+    const s = stats[n];
+    const pct = s.total ? Math.round((s.correct / s.total) * 100) : 0;
+    return `<div class="stat-card">
+      <div class="stat-label">${esc(n)}</div>
+      <div class="stat-value">${s.total ? pct + '%' : '–'}</div>
+      <div style="font-size:11px;color:var(--muted);margin-top:2px">${s.weeks} kupong(er)</div>
+    </div>`;
+  }).join('')}</div>`;
+}
+function renderPlayers() {
+  document.getElementById('player-grid').innerHTML = (state.boys || []).map(name => {
+    const s = computeBoyStats()[name] || { weeks: 0 };
+    return `<div class="player-card">
+      <div class="name">${esc(name)}</div>
+      <div class="share">${s.weeks} kupong(er)</div>
+    </div>`;
+  }).join('');
+}
+
+// ── PWA INSTALL ──
+let deferredInstallPrompt = null;
+window.addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault();
+  deferredInstallPrompt = e;
+  const btn = document.getElementById('android-install-btn');
+  if (btn) btn.style.display = '';
+});
+async function installApp() {
+  if (!deferredInstallPrompt) return;
+  deferredInstallPrompt.prompt();
+  await deferredInstallPrompt.userChoice;
+  deferredInstallPrompt = null;
+  const btn = document.getElementById('android-install-btn');
+  if (btn) btn.style.display = 'none';
+}
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/static/sw.js').catch(e => console.error('sw register', e));
+  });
+}
+
+// ── CLOSE ON BACKDROP ──
+document.querySelectorAll('.modal-overlay').forEach(el => {
+  el.addEventListener('click', function(e) { if (e.target === this) closeUnlockModal(); });
+});
+
+// ── BOOT ──
+init();
+updateAuthUI();
+</script>
+</body>
+</html>

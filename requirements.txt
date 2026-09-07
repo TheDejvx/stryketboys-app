@@ -1,0 +1,5 @@
+flask
+pymongo[srv]
+waitress
+requests
+anthropic
