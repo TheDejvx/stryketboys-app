@@ -161,81 +161,78 @@ def get_anthropic():
     return _anthropic_client
 
 DESCRIBE_PROMPT = (
-    "This is a screenshot of a Svenska Spel Stryktipset betting coupon (Swedish football pool betting). "
-    "It has a numbered list of matches (usually 13), each with three small pill-shaped buttons in a fixed "
-    "left-to-right order: '1', 'X', '2'. A pill is SELECTED if its background is a solid dark navy blue with "
-    "white text, and NOT selected if its background is white/very light with a thin gray border and dark "
-    "text.\n\n"
-    "Process the rows ONE AT A TIME, in strict order from the first row to the last. Do NOT skip ahead and do "
-    "NOT batch multiple rows together — for EVERY row, immediately after analyzing it, output its result line "
-    "before moving to the next row.\n\n"
+    "You are given TWO images of the same Svenska Spel Stryktipset betting coupon (Swedish football pool "
+    "betting). The FIRST image is the full coupon screenshot — use it to read team names, kickoff times, row "
+    "order, and the system type label. The SECOND image is a zoomed-in, enlarged crop of just the right-hand "
+    "column containing the '1' / 'X' / '2' pill buttons for every row, lined up top-to-bottom in the same "
+    "order as the rows in the first image — use this second image specifically to judge each pill's fill "
+    "color, since it is much larger and clearer there than in the full screenshot.\n\n"
+    "Each row has three pill buttons in a fixed left-to-right order: '1', 'X', '2'. A pill is SELECTED if its "
+    "background is a solid dark navy blue with white text, and NOT selected if its background is white/very "
+    "light with a thin gray border and dark text.\n\n"
+    "Process the rows ONE AT A TIME, in strict order from the first row to the last, matching each row between "
+    "the two images by its position in the list. Do NOT skip ahead and do NOT batch multiple rows together — "
+    "for EVERY row, immediately after analyzing it, output its result line before moving to the next row.\n\n"
     "Before row 1, output one line: SYSTEM_TYPE: <the label near the top of the coupon, e.g. 'M-system', "
     "'B-system', 'Helsystem', or 'Enkelrad' if none is visible>\n\n"
     "Then for every single row, output exactly this two-part block, in order:\n"
-    "Analysis: name the two teams, and describe what you see for the '1', 'X', '2' pills individually — this "
-    "is your own note, a separate process will do the final determination.\n"
-    "ROW <n> | <home team> - <away team> | <kickoff text> | 1:(x,y) X:(x,y) 2:(x,y)\n\n"
-    "Where (x,y) is the CENTER POINT of that specific pill button, as a fraction of the full image's total "
-    "width and height (both between 0.00 and 1.00 — top-left corner of the whole image is (0,0), bottom-right "
-    "is (1,1)), given to two decimal places. The three points on a row are three separate side-by-side "
-    "buttons, so their x-coordinates must be clearly different and increasing from '1' to 'X' to '2', while "
-    "sharing roughly the same y-coordinate (same horizontal row). Be as precise as possible locating the "
-    "center of each specific pill — this coordinate is what actually gets used, more important than your "
-    "selected/not-selected note above.\n\n"
-    "Example of one complete row's block:\n"
-    "Analysis: Cardiff vs Sheffield U. The 1 pill looks unselected, the X pill looks selected, the 2 pill "
-    "looks selected.\n"
-    "ROW 7 | Cardiff - Sheffield U | Idag 16:00 | 1:(0.84,0.53) X:(0.90,0.53) 2:(0.96,0.53)\n\n"
+    "Analysis: name the two teams (from image 1), then describe what you see for the '1', 'X', '2' pills "
+    "individually (from image 2, the zoomed column) — do not assume a pattern from previous rows, and do not "
+    "stop looking after finding the first selected pill. It is common and expected for two pills to be "
+    "selected on the same row at once (e.g. X and 2 both selected, 1 empty) — this is a normal 'garderad rad' "
+    "(system bet row), not an error.\n"
+    "ROW <n> | <home team> - <away team> | <kickoff text> | 1=<0 or 1> X=<0 or 1> 2=<0 or 1>\n\n"
+    "Use 1 for selected, 0 for not selected in the ROW line. Example of one complete row's block:\n"
+    "Analysis: Cardiff vs Sheffield U. In the zoomed column, the 1 pill is white with a gray border — not "
+    "selected. The X pill is solid dark navy with white text — selected. The 2 pill is also solid dark navy "
+    "with white text — selected.\n"
+    "ROW 7 | Cardiff - Sheffield U | Idag 16:00 | 1=0 X=1 2=1\n\n"
     "Begin now with SYSTEM_TYPE, then Row 1's analysis and ROW line, then Row 2's, continuing strictly in "
     "order through every row visible on the coupon. Do not skip any row."
 )
 
 ROW_LINE_RE = re.compile(
-    r'ROW\s+(\d+)\s*\|\s*(.+?)\s*-\s*(.+?)\s*\|\s*(.*?)\s*\|\s*'
-    r'1:\(\s*([\d.]+)\s*,\s*([\d.]+)\s*\)\s*'
-    r'X:\(\s*([\d.]+)\s*,\s*([\d.]+)\s*\)\s*'
-    r'2:\(\s*([\d.]+)\s*,\s*([\d.]+)\s*\)',
+    r'ROW\s+(\d+)\s*\|\s*(.+?)\s*-\s*(.+?)\s*\|\s*(.*?)\s*\|\s*1=([01])\s+X=([01])\s+2=([01])',
     re.IGNORECASE,
 )
 SYSTEM_TYPE_RE = re.compile(r'SYSTEM_TYPE:\s*(.+)', re.IGNORECASE)
 
 def parse_decode_analysis(text):
-    """Deterministically parse every 'ROW <n> | ...' line out of the model's response (interleaved
-    one per row, right after that row's own analysis) into row metadata + pill center coordinates.
-    The actual selected/not-selected call is made later from real pixel colors, not trusted from
-    the model's own text — its color judgment for individual pills proved unreliable even when its
-    reasoning was perfectly structured, so coordinates (a much easier task) are all it's trusted for."""
+    """Deterministically parse every 'ROW <n> | ...' result line out of the model's response
+    (interleaved one per row, right after that row's own analysis) — no second LLM call
+    involved, so nothing can get lost in an LLM 're-transcribing itself' step."""
     rows = []
     for m in ROW_LINE_RE.finditer(text):
-        row_num, home, away, kickoff, x1, y1, x2, y2, x3, y3 = m.groups()
+        row_num, home, away, kickoff, one, x, two = m.groups()
+        picks = []
+        if one == '1': picks.append('1')
+        if x == '1': picks.append('X')
+        if two == '1': picks.append('2')
         rows.append({
             'row_num': int(row_num),
             'home': home.strip(),
             'away': away.strip(),
             'kickoff_time': kickoff.strip(),
-            '_coords': {'1': (float(x1), float(y1)), 'X': (float(x2), float(y2)), '2': (float(x3), float(y3))},
+            'picks': picks or ['1'],
+            'zero_picks_read': not picks,
         })
     sys_match = SYSTEM_TYPE_RE.search(text)
     system_type = sys_match.group(1).strip() if sys_match else 'Enkelrad'
     return system_type, rows
 
-def pill_is_selected(img, x_frac, y_frac):
-    """Sample real pixel color at a pill's reported center — selected pills are a solid dark
-    navy fill, unselected are white/very light, so a simple brightness threshold cleanly tells
-    them apart without relying on the model's own (demonstrably unreliable) color judgment."""
+def crop_pills_column(img, left_frac=0.68, upscale=2.5, max_height=4000):
+    """Deterministic crop, zero model localization involved (coordinate estimation from the
+    model proved unreliable — it fabricated a suspiciously perfect linear sequence rather than
+    actually measuring). Right-hand ~32% column is a generous, safe margin for where the 1/X/2
+    pills sit in this app's layout."""
     w, h = img.size
-    x, y = int(x_frac * w), int(y_frac * h)
-    if not (0 <= x < w and 0 <= y < h):
-        return None
-    box_r = max(4, int(w * 0.01))
-    left, top = max(0, x - box_r), max(0, y - box_r)
-    right, bottom = min(w, x + box_r), min(h, y + box_r)
-    region = img.crop((left, top, right, bottom)).convert('RGB')
-    pixels = list(region.getdata())
-    if not pixels:
-        return None
-    avg_brightness = sum(sum(p) / 3 for p in pixels) / len(pixels)
-    return avg_brightness < 140  # dark navy pills sit well below this; white/light ones well above
+    left = int(left_frac * w)
+    cropped = img.crop((left, 0, w, h)).convert('RGB')
+    new_w, new_h = int(cropped.width * upscale), int(cropped.height * upscale)
+    if new_h > max_height:
+        scale = max_height / new_h
+        new_w, new_h = int(new_w * scale), int(new_h * scale)
+    return cropped.resize((new_w, new_h), Image.LANCZOS)
 
 def fuzzy_match_event(home, away, events):
     query = f'{home} {away}'.lower().strip()
@@ -268,16 +265,24 @@ def decode_coupon():
     b64 = base64.b64encode(img_bytes).decode('utf-8')
     image_block = {'type': 'image', 'source': {'type': 'base64', 'media_type': media_type, 'data': b64}}
 
+    zoom_buf = io.BytesIO()
+    crop_pills_column(pil_img).save(zoom_buf, format='JPEG', quality=90)
+    zoom_block = {
+        'type': 'image',
+        'source': {'type': 'base64', 'media_type': 'image/jpeg', 'data': base64.b64encode(zoom_buf.getvalue()).decode('utf-8')},
+    }
+
     try:
-        # A single call: the model reasons in plain text first, then reports where each pill is
-        # (coordinates), interleaved row-by-row. The model's own selected/not-selected color
-        # judgment is logged but never trusted — pixel sampling below is authoritative.
+        # A single call given two images: the full coupon (for team names/order) plus a
+        # deterministically-cropped, upscaled zoom of just the pills column (for color
+        # judgment). Coordinate-pointing was tried and abandoned — the model fabricated a
+        # suspiciously perfect linear sequence rather than actually measuring positions.
         resp = client.messages.create(
             model='claude-sonnet-5',
             max_tokens=4000,
             messages=[{
                 'role': 'user',
-                'content': [image_block, {'type': 'text', 'text': DESCRIBE_PROMPT}],
+                'content': [image_block, zoom_block, {'type': 'text', 'text': DESCRIBE_PROMPT}],
             }],
         )
         analysis_text = ''.join(b.text for b in resp.content if b.type == 'text')
@@ -293,20 +298,6 @@ def decode_coupon():
             print(f'WARNING: only parsed {len(rows)} rows, expected 13')
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
-
-    for row in rows:
-        coords = row.pop('_coords')
-        picks = []
-        sample_log = []
-        for sign in ('1', 'X', '2'):
-            x_frac, y_frac = coords[sign]
-            selected = pill_is_selected(pil_img, x_frac, y_frac)
-            sample_log.append(f'{sign}@({x_frac:.2f},{y_frac:.2f})={selected}')
-            if selected:
-                picks.append(sign)
-        print(f"row {row['row_num']} pixel sample: {' '.join(sample_log)}")
-        row['picks'] = picks or ['1']
-        row['zero_picks_read'] = not picks
 
     draw = _draw_cache or fetch_draw()
     events = (draw or {}).get('events', [])
