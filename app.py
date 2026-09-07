@@ -160,40 +160,78 @@ def get_anthropic():
         _anthropic_client = Anthropic(api_key=key)
     return _anthropic_client
 
-DESCRIBE_PROMPT = (
-    "You are given TWO images of the same Svenska Spel Stryktipset betting coupon (Swedish football pool "
-    "betting). The FIRST image is the full coupon screenshot — use it to read team names, kickoff times, and "
-    "the system type label. The SECOND image is a zoomed-in composite: for every row, its printed row NUMBER "
-    "(far-left of that row) has been cropped and pasted directly next to that SAME row's '1' / 'X' / '2' pill "
-    "buttons (far-right of that row), enlarged for clarity, with the row number and its own pills at the same "
-    "vertical position — so you can match each pill-row to its row number directly within this second image "
-    "itself, without needing to count or cross-reference rows against the first image. Use this second image "
-    "specifically to judge each pill's fill color, since it is much larger and clearer there than in the full "
-    "screenshot, and use its row numbers as the ground truth for which row you are looking at.\n\n"
-    "Each row has three pill buttons in a fixed left-to-right order: '1', 'X', '2'. A pill is SELECTED if its "
-    "background is a solid dark navy blue with white text, and NOT selected if its background is white/very "
-    "light with a thin gray border and dark text.\n\n"
-    "Process the rows ONE AT A TIME, in strict order from the first row to the last, using the row numbers "
-    "visible in the second image as ground truth, and the first image only for team names and kickoff time. "
-    "Do NOT skip ahead and do NOT batch multiple rows together — for EVERY row, immediately after analyzing "
-    "it, output its result line before moving to the next row.\n\n"
-    "Before row 1, output one line: SYSTEM_TYPE: <the label near the top of the coupon, e.g. 'M-system', "
-    "'B-system', 'Helsystem', or 'Enkelrad' if none is visible>\n\n"
-    "Then for every single row, output exactly this two-part block, in order:\n"
-    "Analysis: name the two teams (from image 1), then describe what you see for the '1', 'X', '2' pills "
-    "individually (from image 2, next to that row's own number) — do not assume a pattern from previous rows, "
-    "and do not stop looking after finding the first selected pill. It is common and expected for two pills "
-    "to be selected on the same row at once (e.g. X and 2 both selected, 1 empty) — this is a normal 'garderad "
-    "rad' (system bet row), not an error.\n"
-    "ROW <n> | <home team> - <away team> | <kickoff text> | 1=<0 or 1> X=<0 or 1> 2=<0 or 1>\n\n"
-    "Use 1 for selected, 0 for not selected in the ROW line. Example of one complete row's block:\n"
-    "Analysis: Cardiff vs Sheffield U. In the zoomed column, the 1 pill is white with a gray border — not "
-    "selected. The X pill is solid dark navy with white text — selected. The 2 pill is also solid dark navy "
-    "with white text — selected.\n"
-    "ROW 7 | Cardiff - Sheffield U | Idag 16:00 | 1=0 X=1 2=1\n\n"
-    "Begin now with SYSTEM_TYPE, then Row 1's analysis and ROW line, then Row 2's, continuing strictly in "
-    "order through every row visible on the coupon. Do not skip any row."
+LOCALIZE_PROMPT = (
+    "This is a screenshot of a Svenska Spel Stryktipset betting coupon (Swedish football pool betting). It "
+    "has a numbered list of match rows (usually 13), each with team names and three pill-shaped '1'/'X'/'2' "
+    "buttons on the right.\n\n"
+    "I need to know roughly where this row list sits vertically in the image — not per-pixel precision, just "
+    "a reasonable estimate. Report exactly these three lines and nothing else:\n"
+    "ROW_COUNT: <number of match rows visible, usually 13>\n"
+    "ROW1_Y: <fraction from 0.00 (very top of image) to 1.00 (very bottom), for the vertical center of the "
+    "FIRST match row>\n"
+    "LASTROW_Y: <fraction from 0.00 to 1.00, for the vertical center of the LAST match row>"
 )
+LOCALIZE_RE = re.compile(
+    r'ROW_COUNT:\s*(\d+).*?ROW1_Y:\s*([\d.]+).*?LASTROW_Y:\s*([\d.]+)',
+    re.IGNORECASE | re.DOTALL,
+)
+# Fallback if the localization call fails or returns nonsense — roughly matches the layout of a
+# typical "Mina spel" coupon screenshot (header/deadline/system-type info above the list).
+FALLBACK_ROW_COUNT, FALLBACK_ROW1_Y, FALLBACK_LASTROW_Y = 13, 0.28, 0.92
+
+def parse_localize(text):
+    m = LOCALIZE_RE.search(text)
+    if not m:
+        return FALLBACK_ROW_COUNT, FALLBACK_ROW1_Y, FALLBACK_LASTROW_Y
+    row_count, row1_y, lastrow_y = int(m.group(1)), float(m.group(2)), float(m.group(3))
+    if not (10 <= row_count <= 15 and 0.0 <= row1_y < lastrow_y <= 1.0 and lastrow_y - row1_y >= 0.25):
+        print(f'LOCALIZE sanity check failed (count={row_count}, row1_y={row1_y}, lastrow_y={lastrow_y}) — using fallback')
+        return FALLBACK_ROW_COUNT, FALLBACK_ROW1_Y, FALLBACK_LASTROW_Y
+    return row_count, row1_y, lastrow_y
+
+def crop_row_band(img, center_y_frac, row_height_frac, pills_left_frac=0.68, upscale=3.0, max_dim=1100, pad=0.7):
+    """One isolated, zoomed crop of a single row's pill area. Row identity is guaranteed by
+    construction (this band came from a known, code-computed y-range) — not something the model
+    has to infer, count, or cross-reference, which is what kept going wrong in earlier attempts."""
+    w, h = img.size
+    top = max(0.0, center_y_frac - row_height_frac * pad)
+    bottom = min(1.0, center_y_frac + row_height_frac * pad)
+    band = img.crop((int(pills_left_frac * w), int(top * h), w, int(bottom * h))).convert('RGB')
+    new_w, new_h = int(band.width * upscale), int(band.height * upscale)
+    if max(new_w, new_h) > max_dim:
+        scale = max_dim / max(new_w, new_h)
+        new_w, new_h = int(new_w * scale), int(new_h * scale)
+    return band.resize((new_w, new_h), Image.LANCZOS)
+
+def build_analyze_prompt(row_count):
+    return (
+        f"You are given {row_count + 1} images of the same Svenska Spel Stryktipset betting coupon (Swedish "
+        f"football pool betting). Image 1 is the full coupon screenshot — use it only to read team names, "
+        f"kickoff times, and the system type label, in row order. Images 2 through {row_count + 1} are, "
+        f"IN ORDER, isolated zoomed crops of each row's own '1'/'X'/'2' pill buttons: image 2 is row 1's "
+        f"pills, image 3 is row 2's pills, and so on through image {row_count + 1} being row {row_count}'s "
+        f"pills. You do NOT need to figure out which crop belongs to which row — they are already given to "
+        f"you in guaranteed row order, one crop per row.\n\n"
+        "A pill is SELECTED if its background is a solid dark navy blue with white text, and NOT selected if "
+        "its background is white/very light with a thin gray border and dark text.\n\n"
+        "Before row 1, output one line: SYSTEM_TYPE: <the label near the top of the coupon in image 1, e.g. "
+        "'M-system', 'B-system', 'Helsystem', or 'Enkelrad' if none is visible>\n\n"
+        f"Then, processing rows 1 through {row_count} in strict order, for every single row output exactly "
+        "this two-part block:\n"
+        "Analysis: name the two teams and kickoff time (from image 1, this row), then describe what you see "
+        "for the '1', 'X', '2' pills individually in this row's own dedicated crop image — do not assume a "
+        "pattern from previous rows, and do not stop looking after finding the first selected pill. It is "
+        "common and expected for two pills to be selected on the same row at once (e.g. X and 2 both "
+        "selected, 1 empty) — this is a normal 'garderad rad' (system bet row), not an error.\n"
+        "ROW <n> | <home team> - <away team> | <kickoff text> | 1=<0 or 1> X=<0 or 1> 2=<0 or 1>\n\n"
+        "Use 1 for selected, 0 for not selected. Example of one complete row's block:\n"
+        "Analysis: Cardiff vs Sheffield U, Idag 16:00. In this row's crop, the 1 pill is white with a gray "
+        "border — not selected. The X pill is solid dark navy with white text — selected. The 2 pill is also "
+        "solid dark navy with white text — selected.\n"
+        "ROW 7 | Cardiff - Sheffield U | Idag 16:00 | 1=0 X=1 2=1\n\n"
+        f"Begin now with SYSTEM_TYPE, then row 1's block using image 2, then row 2's block using image 3, "
+        f"continuing strictly in order through row {row_count} using image {row_count + 1}."
+    )
 
 ROW_LINE_RE = re.compile(
     r'ROW\s+(\d+)\s*\|\s*(.+?)\s*-\s*(.+?)\s*\|\s*(.*?)\s*\|\s*1=([01])\s+X=([01])\s+2=([01])',
@@ -223,26 +261,6 @@ def parse_decode_analysis(text):
     sys_match = SYSTEM_TYPE_RE.search(text)
     system_type = sys_match.group(1).strip() if sys_match else 'Enkelrad'
     return system_type, rows
-
-def crop_row_numbers_and_pills(img, num_frac=0.08, pills_frac=0.68, upscale=2.5, max_height=4000, gap=24):
-    """Deterministic crop, zero model localization involved (coordinate estimation from the
-    model proved unreliable — it fabricated a suspiciously perfect linear sequence rather than
-    actually measuring). Stitches the far-left row-number column directly next to the far-right
-    pills column (same original y-coordinates preserved, so row N's number stays vertically
-    aligned with row N's own pills) — a crop of the pills alone gave the model nothing to anchor
-    row identity to, risking a miscounted/shifted match against the full screenshot."""
-    w, h = img.size
-    left_strip = img.crop((0, 0, int(num_frac * w), h)).convert('RGB')
-    right_strip = img.crop((int(pills_frac * w), 0, w, h)).convert('RGB')
-    total_w = left_strip.width + gap + right_strip.width
-    composite = Image.new('RGB', (total_w, h), (255, 255, 255))
-    composite.paste(left_strip, (0, 0))
-    composite.paste(right_strip, (left_strip.width + gap, 0))
-    new_w, new_h = int(total_w * upscale), int(h * upscale)
-    if new_h > max_height:
-        scale = max_height / new_h
-        new_w, new_h = int(new_w * scale), int(new_h * scale)
-    return composite.resize((new_w, new_h), Image.LANCZOS)
 
 def fuzzy_match_event(home, away, events):
     query = f'{home} {away}'.lower().strip()
@@ -275,24 +293,44 @@ def decode_coupon():
     b64 = base64.b64encode(img_bytes).decode('utf-8')
     image_block = {'type': 'image', 'source': {'type': 'base64', 'media_type': media_type, 'data': b64}}
 
-    zoom_buf = io.BytesIO()
-    crop_row_numbers_and_pills(pil_img).save(zoom_buf, format='JPEG', quality=90)
-    zoom_block = {
-        'type': 'image',
-        'source': {'type': 'base64', 'media_type': 'image/jpeg', 'data': base64.b64encode(zoom_buf.getvalue()).decode('utf-8')},
-    }
-
     try:
-        # A single call given two images: the full coupon (for team names/order) plus a
-        # deterministically-cropped, upscaled zoom of just the pills column (for color
-        # judgment). Coordinate-pointing was tried and abandoned — the model fabricated a
-        # suspiciously perfect linear sequence rather than actually measuring positions.
+        # Call 1: coarse localization only (where does the row list start/end, how many rows) —
+        # a much lower-precision ask than earlier per-pill coordinate attempts, which failed
+        # outright (the model fabricated a suspiciously perfect linear sequence rather than
+        # actually measuring). Sanity-checked in parse_localize(); falls back to a fixed default
+        # rather than trusting obviously-broken numbers.
+        localize_resp = client.messages.create(
+            model='claude-sonnet-5',
+            max_tokens=200,
+            messages=[{'role': 'user', 'content': [image_block, {'type': 'text', 'text': LOCALIZE_PROMPT}]}],
+        )
+        localize_text = ''.join(b.text for b in localize_resp.content if b.type == 'text')
+        print(f'--- coupon decode localize: {localize_text.strip()!r} ---')
+        row_count, row1_y, lastrow_y = parse_localize(localize_text)
+        row_height = (lastrow_y - row1_y) / max(1, row_count - 1)
+
+        # Deterministically slice each row's pill area into its own isolated, zoomed crop —
+        # row identity is now guaranteed by code (send order), not something the model has to
+        # infer, count, or cross-reference against another image, which is what kept going
+        # wrong (rows silently skipped, or the wrong row's pills read for a given team name).
+        row_blocks = []
+        for i in range(row_count):
+            center_y = row1_y + i * row_height
+            buf = io.BytesIO()
+            crop_row_band(pil_img, center_y, row_height).save(buf, format='JPEG', quality=90)
+            row_blocks.append({
+                'type': 'image',
+                'source': {'type': 'base64', 'media_type': 'image/jpeg', 'data': base64.b64encode(buf.getvalue()).decode('utf-8')},
+            })
+
+        # Call 2: read team names/kickoff/system type from the full image, and read each row's
+        # pills from that row's own dedicated crop, in guaranteed order.
         resp = client.messages.create(
             model='claude-sonnet-5',
-            max_tokens=4000,
+            max_tokens=4500,
             messages=[{
                 'role': 'user',
-                'content': [image_block, zoom_block, {'type': 'text', 'text': DESCRIBE_PROMPT}],
+                'content': [image_block, *row_blocks, {'type': 'text', 'text': build_analyze_prompt(row_count)}],
             }],
         )
         analysis_text = ''.join(b.text for b in resp.content if b.type == 'text')
@@ -304,12 +342,12 @@ def decode_coupon():
         system_type, rows = parse_decode_analysis(analysis_text)
         if not rows:
             return jsonify({'status': 'error', 'message': 'Could not parse the model’s analysis — try again'}), 500
-        if len(rows) != 13:
-            missing = sorted(set(range(1, 14)) - {r['row_num'] for r in rows})
-            print(f'WARNING: parsed {len(rows)} rows, expected 13 — missing row(s): {missing}')
+        if len(rows) != row_count:
+            missing = sorted(set(range(1, row_count + 1)) - {r['row_num'] for r in rows})
+            print(f'WARNING: parsed {len(rows)} rows, expected {row_count} — missing row(s): {missing}')
             return jsonify({
                 'status': 'error',
-                'message': f'Läste bara {len(rows)} av 13 rader (saknar rad {", ".join(map(str, missing))}) — försök igen',
+                'message': f'Läste bara {len(rows)} av {row_count} rader (saknar rad {", ".join(map(str, missing))}) — försök igen',
             }), 500
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
