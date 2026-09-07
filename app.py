@@ -165,22 +165,26 @@ DESCRIBE_PROMPT = (
     "left-to-right order: '1', 'X', '2'.\n\n"
     "A pill is SELECTED if its background is a solid dark navy blue with white text.\n"
     "A pill is NOT selected if its background is white/very light with a thin gray border and dark text.\n\n"
-    "First, go through the coupon row by row and write a detailed analysis in your own words: for each row, "
-    "describe the two team names, the kickoff time text, and look at the '1' pill, the 'X' pill, and the '2' "
-    "pill separately, describing what you actually see for each one individually. Do not assume a pattern "
-    "from previous rows, and do not stop looking after finding the first selected pill on a row — it is "
-    "common and expected for two pills to be selected on the same row at once (e.g. X and 2 both selected, "
-    "1 empty); this is a normal 'garderad rad' (system bet row), not an error.\n\n"
-    "Also note the system type label near the top of the coupon if shown (e.g. 'M-system', 'B-system', "
-    "'Helsystem'), or 'Enkelrad' if none is visible.\n\n"
-    "AFTER finishing that full written analysis, output one final line:\n"
-    "SYSTEM_TYPE: <the label, or Enkelrad>\n\n"
-    "Then output a machine-readable summary block, starting with the exact line 'SUMMARY:' followed by "
-    "exactly one line per row in this EXACT format (no extra words, no punctuation changes):\n"
+    "Process the rows ONE AT A TIME, in strict order from the first row to the last. Do NOT skip ahead, do "
+    "NOT batch multiple rows together, and do NOT summarize everything at the end — for EVERY row, immediately "
+    "after analyzing it, output its result line before moving to the next row. Never move on to the next row "
+    "without first outputting the result line for the current one — a row that gets skipped in your written "
+    "analysis must never appear with a guessed answer later.\n\n"
+    "Before row 1, output one line: SYSTEM_TYPE: <the label near the top of the coupon, e.g. 'M-system', "
+    "'B-system', 'Helsystem', or 'Enkelrad' if none is visible>\n\n"
+    "Then for every single row, output exactly this two-part block, in order, before moving to the next row:\n"
+    "Analysis: describe what you actually see for the '1' pill, the 'X' pill, and the '2' pill on this row, "
+    "individually and separately — do not assume a pattern from previous rows, and do not stop looking after "
+    "finding the first selected pill. It is common and expected for two pills to be selected on the same row "
+    "at once (e.g. X and 2 both selected, 1 empty) — this is a normal 'garderad rad' (system bet row), not an "
+    "error.\n"
     "ROW <n> | <home team> - <away team> | <kickoff text> | 1=<0 or 1> X=<0 or 1> 2=<0 or 1>\n\n"
-    "Use 1 for selected, 0 for not selected. Example: ROW 7 | Cardiff - Sheffield U | Idag 16:00 | 1=0 X=1 2=1\n\n"
-    "The SUMMARY block's 1/X/2 flags for each row must exactly match your written analysis above for that "
-    "row — this is a mechanical transcription of what you already determined, not a new judgment."
+    "Use 1 for selected, 0 for not selected in the ROW line. Example of one complete row's block:\n"
+    "Analysis: The 1 pill is white with a gray border — not selected. The X pill is solid dark navy with "
+    "white text — selected. The 2 pill is also solid dark navy with white text — selected.\n"
+    "ROW 7 | Cardiff - Sheffield U | Idag 16:00 | 1=0 X=1 2=1\n\n"
+    "Begin now with SYSTEM_TYPE, then Row 1's analysis and ROW line, then Row 2's, continuing strictly in "
+    "order through every row visible on the coupon. Do not skip any row."
 )
 
 ROW_LINE_RE = re.compile(
@@ -190,8 +194,9 @@ ROW_LINE_RE = re.compile(
 SYSTEM_TYPE_RE = re.compile(r'SYSTEM_TYPE:\s*(.+)', re.IGNORECASE)
 
 def parse_decode_analysis(text):
-    """Deterministically parse the model's SUMMARY block — no second LLM call involved,
-    so nothing can get lost in an LLM 're-transcribing itself' step."""
+    """Deterministically parse every 'ROW <n> | ...' result line out of the model's response
+    (interleaved one per row, right after that row's own analysis) — no second LLM call
+    involved, so nothing can get lost in an LLM 're-transcribing itself' step."""
     rows = []
     for m in ROW_LINE_RE.finditer(text):
         row_num, home, away, kickoff, one, x, two = m.groups()
