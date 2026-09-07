@@ -190,24 +190,31 @@ DECODE_TOOL = {
     }
 }
 
-DECODE_PROMPT = (
-    "This is a screenshot of a Svenska Spel Stryktipset betting coupon (Swedish football pool betting, "
-    "normally 13 rows). Each row has three separate pill-shaped buttons labeled 1, X, 2.\n\n"
-    "CRITICAL: these are NOT radio buttons. More than one button on the same row can be selected "
-    "simultaneously — this is a normal, common 'garderad rad' (system bet row), e.g. both X and 2 filled "
-    "on the same row at once. Do NOT assume a row has only one selection. You must inspect the '1' button, "
-    "the 'X' button, and the '2' button on every row as three completely independent yes/no questions — "
-    "checking whether '1' is filled tells you nothing about whether 'X' or '2' are also filled. It is very "
-    "common for a row to have exactly two buttons filled (e.g. X and 2 both selected, with 1 empty) — do not "
-    "stop looking after finding the first filled button on a row.\n\n"
-    "A button is SELECTED (independently, per-button) if it has a solid dark navy blue fill with white text.\n"
-    "A button is NOT selected if it has a white/light background with a thin gray border and dark text.\n\n"
-    "For each row, read: the home and away team names, the kickoff time text exactly as shown (e.g. 'Idag 18:30'), "
-    "and set one_selected/x_selected/two_selected independently and truthfully based on what you actually see "
-    "for that specific button — not based on a pattern or assumption from other rows. "
-    "Also read the system type label shown near the top of the coupon if any (e.g. 'M-system', 'B-system', 'Helsystem'); "
-    "use 'Enkelrad' if none is visible.\n\n"
-    "Call record_coupon with the full structured result for every row visible on the coupon."
+DESCRIBE_PROMPT = (
+    "This is a screenshot of a Svenska Spel Stryktipset betting coupon (Swedish football pool betting). "
+    "It has a numbered list of matches (usually 13), each with three small pill-shaped buttons in a fixed "
+    "left-to-right order: '1', 'X', '2'.\n\n"
+    "A pill is SELECTED if its background is a solid dark navy blue with white text.\n"
+    "A pill is NOT selected if its background is white/very light with a thin gray border and dark text.\n\n"
+    "Go through the coupon row by row, from the first row to the last. For EACH row, write one line in "
+    "exactly this format:\n"
+    "Row <n>: <home team> - <away team> | kickoff: <text as shown> | 1=<selected/not selected> "
+    "X=<selected/not selected> 2=<selected/not selected>\n\n"
+    "Look at each of the three pills independently and deliberately — do not assume a pattern from previous "
+    "rows, and do not stop looking after finding the first selected pill on a row. It is common and expected "
+    "for two pills to be selected on the same row at once (e.g. X and 2 both selected, 1 empty) — this is a "
+    "normal 'garderad rad' (system bet row), not an error. Also note the system type label near the top of "
+    "the coupon if shown (e.g. 'M-system', 'B-system', 'Helsystem'), or 'Enkelrad' if none is visible.\n\n"
+    "Write your row-by-row analysis now, being careful and deliberate about each of the three pills on every "
+    "row before moving to the next."
+)
+
+EXTRACT_PROMPT_TEMPLATE = (
+    "Here is your own careful row-by-row analysis of a Stryktipset coupon screenshot:\n\n"
+    "{analysis}\n\n"
+    "Convert this analysis into a record_coupon call. For every row, set one_selected/x_selected/two_selected "
+    "to match exactly what your analysis above states for that row — transcribe your own prior analysis "
+    "faithfully into the structured format rather than re-examining the image from scratch."
 )
 
 def fuzzy_match_event(home, away, events):
@@ -232,8 +239,27 @@ def decode_coupon():
     img_bytes = img.read()
     media_type = img.mimetype or 'image/jpeg'
     b64 = base64.b64encode(img_bytes).decode('utf-8')
+    image_block = {'type': 'image', 'source': {'type': 'base64', 'media_type': media_type, 'data': b64}}
 
     try:
+        # Pass 1: let the model reason in plain text first. Forcing a structured tool call immediately
+        # (tool_choice from the first token) gave it zero room to actually look carefully at each of the
+        # 13 rows before committing to an answer, and it was silently under-reading garderade (multi-sign)
+        # rows as a result. A plain-text row-by-row pass first, then transcribing that into the schema,
+        # gives it real reasoning space before it has to commit.
+        describe_resp = client.messages.create(
+            model='claude-sonnet-5',
+            max_tokens=3000,
+            messages=[{
+                'role': 'user',
+                'content': [image_block, {'type': 'text', 'text': DESCRIBE_PROMPT}],
+            }],
+        )
+        analysis_text = ''.join(b.text for b in describe_resp.content if b.type == 'text')
+        if not analysis_text.strip():
+            return jsonify({'status': 'error', 'message': 'Model returned no analysis'}), 500
+
+        # Pass 2: transcribe that already-completed analysis into the structured schema.
         resp = client.messages.create(
             model='claude-sonnet-5',
             max_tokens=2048,
@@ -241,10 +267,7 @@ def decode_coupon():
             tool_choice={'type': 'tool', 'name': 'record_coupon'},
             messages=[{
                 'role': 'user',
-                'content': [
-                    {'type': 'image', 'source': {'type': 'base64', 'media_type': media_type, 'data': b64}},
-                    {'type': 'text', 'text': DECODE_PROMPT},
-                ],
+                'content': [image_block, {'type': 'text', 'text': EXTRACT_PROMPT_TEMPLATE.format(analysis=analysis_text)}],
             }],
         )
         tool_use = next((b for b in resp.content if b.type == 'tool_use'), None)
