@@ -1,5 +1,5 @@
 from flask import Flask, render_template, jsonify, request
-import json, os, threading, time, base64
+import json, os, re, threading, time, base64
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -159,63 +159,57 @@ def get_anthropic():
         _anthropic_client = Anthropic(api_key=key)
     return _anthropic_client
 
-DECODE_TOOL = {
-    'name': 'record_coupon',
-    'description': 'Record the decoded Stryktipset coupon rows read from the screenshot.',
-    'input_schema': {
-        'type': 'object',
-        'properties': {
-            'system_type': {
-                'type': 'string',
-                'description': "The system label shown on the coupon, e.g. 'M-system', 'B-system', 'Helsystem'. Use 'Enkelrad' if no such label is visible (a plain single-sign coupon)."
-            },
-            'rows': {
-                'type': 'array',
-                'items': {
-                    'type': 'object',
-                    'properties': {
-                        'row_num': {'type': 'integer', 'description': 'Row number 1-13 as printed on the coupon'},
-                        'home': {'type': 'string'},
-                        'away': {'type': 'string'},
-                        'kickoff_time': {'type': 'string', 'description': "Text as shown, e.g. 'Idag 18:30'"},
-                        'one_selected': {'type': 'boolean', 'description': "True only if the '1' button has a solid dark-navy fill with white text. Judge this independently of X and 2 — do not assume only one button per row can be selected."},
-                        'x_selected': {'type': 'boolean', 'description': "True only if the 'X' button has a solid dark-navy fill with white text. Judge this independently of 1 and 2 — do not assume only one button per row can be selected."},
-                        'two_selected': {'type': 'boolean', 'description': "True only if the '2' button has a solid dark-navy fill with white text. Judge this independently of 1 and X — do not assume only one button per row can be selected."},
-                    },
-                    'required': ['row_num', 'home', 'away', 'one_selected', 'x_selected', 'two_selected']
-                }
-            }
-        },
-        'required': ['rows']
-    }
-}
-
 DESCRIBE_PROMPT = (
     "This is a screenshot of a Svenska Spel Stryktipset betting coupon (Swedish football pool betting). "
     "It has a numbered list of matches (usually 13), each with three small pill-shaped buttons in a fixed "
     "left-to-right order: '1', 'X', '2'.\n\n"
     "A pill is SELECTED if its background is a solid dark navy blue with white text.\n"
     "A pill is NOT selected if its background is white/very light with a thin gray border and dark text.\n\n"
-    "Go through the coupon row by row, from the first row to the last. For EACH row, write one line in "
-    "exactly this format:\n"
-    "Row <n>: <home team> - <away team> | kickoff: <text as shown> | 1=<selected/not selected> "
-    "X=<selected/not selected> 2=<selected/not selected>\n\n"
-    "Look at each of the three pills independently and deliberately — do not assume a pattern from previous "
-    "rows, and do not stop looking after finding the first selected pill on a row. It is common and expected "
-    "for two pills to be selected on the same row at once (e.g. X and 2 both selected, 1 empty) — this is a "
-    "normal 'garderad rad' (system bet row), not an error. Also note the system type label near the top of "
-    "the coupon if shown (e.g. 'M-system', 'B-system', 'Helsystem'), or 'Enkelrad' if none is visible.\n\n"
-    "Write your row-by-row analysis now, being careful and deliberate about each of the three pills on every "
-    "row before moving to the next."
+    "First, go through the coupon row by row and write a detailed analysis in your own words: for each row, "
+    "describe the two team names, the kickoff time text, and look at the '1' pill, the 'X' pill, and the '2' "
+    "pill separately, describing what you actually see for each one individually. Do not assume a pattern "
+    "from previous rows, and do not stop looking after finding the first selected pill on a row — it is "
+    "common and expected for two pills to be selected on the same row at once (e.g. X and 2 both selected, "
+    "1 empty); this is a normal 'garderad rad' (system bet row), not an error.\n\n"
+    "Also note the system type label near the top of the coupon if shown (e.g. 'M-system', 'B-system', "
+    "'Helsystem'), or 'Enkelrad' if none is visible.\n\n"
+    "AFTER finishing that full written analysis, output one final line:\n"
+    "SYSTEM_TYPE: <the label, or Enkelrad>\n\n"
+    "Then output a machine-readable summary block, starting with the exact line 'SUMMARY:' followed by "
+    "exactly one line per row in this EXACT format (no extra words, no punctuation changes):\n"
+    "ROW <n> | <home team> - <away team> | <kickoff text> | 1=<0 or 1> X=<0 or 1> 2=<0 or 1>\n\n"
+    "Use 1 for selected, 0 for not selected. Example: ROW 7 | Cardiff - Sheffield U | Idag 16:00 | 1=0 X=1 2=1\n\n"
+    "The SUMMARY block's 1/X/2 flags for each row must exactly match your written analysis above for that "
+    "row — this is a mechanical transcription of what you already determined, not a new judgment."
 )
 
-EXTRACT_PROMPT_TEMPLATE = (
-    "Here is your own careful row-by-row analysis of a Stryktipset coupon screenshot:\n\n"
-    "{analysis}\n\n"
-    "Convert this analysis into a record_coupon call. For every row, set one_selected/x_selected/two_selected "
-    "to match exactly what your analysis above states for that row — transcribe your own prior analysis "
-    "faithfully into the structured format rather than re-examining the image from scratch."
+ROW_LINE_RE = re.compile(
+    r'ROW\s+(\d+)\s*\|\s*(.+?)\s*-\s*(.+?)\s*\|\s*(.*?)\s*\|\s*1=([01])\s+X=([01])\s+2=([01])',
+    re.IGNORECASE,
 )
+SYSTEM_TYPE_RE = re.compile(r'SYSTEM_TYPE:\s*(.+)', re.IGNORECASE)
+
+def parse_decode_analysis(text):
+    """Deterministically parse the model's SUMMARY block — no second LLM call involved,
+    so nothing can get lost in an LLM 're-transcribing itself' step."""
+    rows = []
+    for m in ROW_LINE_RE.finditer(text):
+        row_num, home, away, kickoff, one, x, two = m.groups()
+        picks = []
+        if one == '1': picks.append('1')
+        if x == '1': picks.append('X')
+        if two == '1': picks.append('2')
+        rows.append({
+            'row_num': int(row_num),
+            'home': home.strip(),
+            'away': away.strip(),
+            'kickoff_time': kickoff.strip(),
+            'picks': picks or ['1'],
+            'zero_picks_read': not picks,
+        })
+    sys_match = SYSTEM_TYPE_RE.search(text)
+    system_type = sys_match.group(1).strip() if sys_match else 'Enkelrad'
+    return system_type, rows
 
 def fuzzy_match_event(home, away, events):
     query = f'{home} {away}'.lower().strip()
@@ -242,53 +236,36 @@ def decode_coupon():
     image_block = {'type': 'image', 'source': {'type': 'base64', 'media_type': media_type, 'data': b64}}
 
     try:
-        # Pass 1: let the model reason in plain text first. Forcing a structured tool call immediately
-        # (tool_choice from the first token) gave it zero room to actually look carefully at each of the
-        # 13 rows before committing to an answer, and it was silently under-reading garderade (multi-sign)
-        # rows as a result. A plain-text row-by-row pass first, then transcribing that into the schema,
-        # gives it real reasoning space before it has to commit.
-        describe_resp = client.messages.create(
+        # A single call: the model reasons in plain text first, then ends with a strict
+        # machine-readable SUMMARY block that we parse with a regex — no second LLM call
+        # "transcribing" its own analysis, which was the likely spot information about
+        # garderade (multi-sign) rows was getting lost.
+        resp = client.messages.create(
             model='claude-sonnet-5',
-            max_tokens=3000,
+            max_tokens=4000,
             messages=[{
                 'role': 'user',
                 'content': [image_block, {'type': 'text', 'text': DESCRIBE_PROMPT}],
             }],
         )
-        analysis_text = ''.join(b.text for b in describe_resp.content if b.type == 'text')
+        analysis_text = ''.join(b.text for b in resp.content if b.type == 'text')
         if not analysis_text.strip():
             return jsonify({'status': 'error', 'message': 'Model returned no analysis'}), 500
-
-        # Pass 2: transcribe that already-completed analysis into the structured schema.
-        resp = client.messages.create(
-            model='claude-sonnet-5',
-            max_tokens=2048,
-            tools=[DECODE_TOOL],
-            tool_choice={'type': 'tool', 'name': 'record_coupon'},
-            messages=[{
-                'role': 'user',
-                'content': [image_block, {'type': 'text', 'text': EXTRACT_PROMPT_TEMPLATE.format(analysis=analysis_text)}],
-            }],
-        )
-        tool_use = next((b for b in resp.content if b.type == 'tool_use'), None)
-        if not tool_use:
-            return jsonify({'status': 'error', 'message': 'Model did not return structured data'}), 500
-        decoded = tool_use.input
+        print('--- coupon decode raw analysis ---')
+        print(analysis_text)
+        print('--- end raw analysis ---')
+        system_type, rows = parse_decode_analysis(analysis_text)
+        if not rows:
+            return jsonify({'status': 'error', 'message': 'Could not parse the model’s analysis — try again'}), 500
+        if len(rows) < 13:
+            print(f'WARNING: only parsed {len(rows)} rows, expected 13')
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
     draw = _draw_cache or fetch_draw()
     events = (draw or {}).get('events', [])
 
-    rows = decoded.get('rows', [])
     for row in rows:
-        picks = []
-        if row.pop('one_selected', False): picks.append('1')
-        if row.pop('x_selected', False): picks.append('X')
-        if row.pop('two_selected', False): picks.append('2')
-        row['picks'] = picks or ['1']  # never leave a row with zero picks — flagged below if so
-        row['zero_picks_read'] = not picks
-
         match, score = fuzzy_match_event(row.get('home', ''), row.get('away', ''), events)
         if match and score > 0.55:
             row['match_id'] = match['match_id']
@@ -301,7 +278,7 @@ def decode_coupon():
 
     return jsonify({
         'status': 'ok',
-        'system_type': decoded.get('system_type', 'Enkelrad'),
+        'system_type': system_type,
         'rows': rows,
         'draw_number': (draw or {}).get('draw_number'),
     })
