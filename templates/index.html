@@ -682,6 +682,16 @@ function deriveResultSign(ev) {
     return 'X';
   } catch { return null; }
 }
+// For display only (not settlement) — the running score while a match is live. Prefers the
+// 'Current' result entry (the live-updating one) over 'Fulltime' (which deriveResultSign uses
+// for final settlement and which may not reflect the live score mid-match).
+function currentScore(ev) {
+  const res = ev && ev.result;
+  if (!res || !Array.isArray(res) || !res.length) return null;
+  const entry = res.find(r => r.sportEventResultType === 'Current') || res[0];
+  if (!entry || entry.home == null || entry.away == null) return null;
+  return `${entry.home}-${entry.away}`;
+}
 // Explicit rotation order (usernames) + a pointer, persisted in state — not derived from
 // state.weeks.length, which was fragile (a deleted test coupon or an off-cycle upload silently
 // shifted whose turn it was next). The order itself is set by the group, not inferred.
@@ -781,7 +791,16 @@ function buildWeekRows(week) {
     let badge = `<span class="match-badge badge-pending">Ej startad</span>`;
     if (live) {
       const minuteText = ev && ev.live_minute ? ` ${esc(ev.live_minute)}` : '';
-      badge = `<span class="match-badge badge-live">🔴 Pågår${minuteText}</span>`;
+      const score = currentScore(ev);
+      const scoreText = score ? ` ${score}` : '';
+      if (liveSign) {
+        const hit = (row.picks || []).includes(liveSign);
+        badge = hit
+          ? `<span class="match-badge badge-correct">🔴${scoreText} · Rätt just nu${minuteText}</span>`
+          : `<span class="match-badge badge-incorrect">🔴${scoreText} · Fel just nu${minuteText}</span>`;
+      } else {
+        badge = `<span class="match-badge badge-live">🔴 Pågår${scoreText}${minuteText}</span>`;
+      }
     }
     if (finished) {
       if (row.settled_result) {
