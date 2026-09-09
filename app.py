@@ -66,7 +66,10 @@ def find_user(data, username):
     return None
 
 def public_data(data):
-    """Strip password hashes before this ever reaches the client."""
+    """Strip password hashes before this ever reaches the client. last_login rides along here
+    too — the frontend only ever renders the logged-in user's own value (see renderMyLastLogin
+    in index.html), not shown for anyone else, even though it's technically present for all
+    users in this response (same trust level as the rest of this friend-app's session model)."""
     return {
         **data,
         'users': [
@@ -74,6 +77,7 @@ def public_data(data):
                 'username': u.get('username'),
                 'display_name': u.get('display_name'),
                 'must_change_password': u.get('must_change_password', False),
+                'last_login': u.get('last_login'),
             }
             for u in data.get('users', [])
         ],
@@ -543,6 +547,9 @@ def login():
     user = find_user(data, payload.get('username'))
     if not user or not check_password_hash(user.get('password_hash', ''), payload.get('password', '')):
         return jsonify({'status': 'error', 'message': 'Fel användarnamn eller lösenord'}), 401
+    # Tracked for lookup only — deliberately not surfaced anywhere in the UI.
+    user['last_login'] = datetime.now(timezone.utc).isoformat()
+    save_data(data)
     return jsonify({
         'status': 'ok',
         'username': user['username'],

@@ -365,6 +365,8 @@ body {
 
       <div id="uploader-schedule"></div>
 
+      <div id="my-last-login" style="text-align:center;font-size:11px;color:rgba(255,255,255,.4);padding:4px 0 0"></div>
+
     </div>
 
     <!-- HISTORIK -->
@@ -800,6 +802,21 @@ function render() {
   renderStats();
   renderPlayers();
   renderUploaderSchedule();
+  renderMyLastLogin();
+}
+
+// last_login rides along in /api/data for every user (see public_data() in app.py), but this
+// deliberately only ever renders the *currently logged-in* user's own value — never anyone
+// else's — per explicit instruction not to expose who's been logging in to the group at large.
+function renderMyLastLogin() {
+  const el = document.getElementById('my-last-login');
+  if (!el) return;
+  const session = getSession();
+  if (!session) { el.textContent = ''; return; }
+  const user = (state.users || []).find(u => u.username === session.username);
+  if (!user || !user.last_login) { el.textContent = ''; return; }
+  const dateStr = new Date(user.last_login).toLocaleString('sv-SE', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+  el.textContent = `Senast inloggad: ${dateStr}`;
 }
 
 // Projects the next 10 rotation turns onto dates. There's no single "one turn per week" clock
