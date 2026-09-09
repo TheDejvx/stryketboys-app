@@ -265,6 +265,14 @@ body {
 .expand-caret { font-size: 10px; color: var(--muted); }
 .week-detail { border-top: 1px solid var(--border); background: var(--light-bg); }
 
+/* ── UPLOADER SCHEDULE ── */
+.schedule-row { display: flex; justify-content: space-between; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--border); font-size: 13.5px; }
+.schedule-row:last-child { border-bottom: none; }
+.schedule-row.schedule-current { background: var(--win-bg); }
+.schedule-row .schedule-name { font-weight: 600; }
+.schedule-row .schedule-name .schedule-turn { font-size: 10px; font-weight: 700; color: var(--muted); margin-right: 6px; }
+.schedule-row .schedule-date { color: var(--muted); font-size: 12.5px; }
+
 .stats-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
 @media (min-width: 480px) { .stats-grid { grid-template-columns: repeat(3, 1fr); } }
 .stat-card { background: var(--light-bg); border-radius: 10px; padding: 13px 10px; text-align: center; }
@@ -353,6 +361,8 @@ body {
           <li>Ladda upp printscreen här i appen</li>
         </ol>
       </div>
+
+      <div id="uploader-schedule"></div>
 
     </div>
 
@@ -740,6 +750,42 @@ function render() {
   renderHistory();
   renderStats();
   renderPlayers();
+  renderUploaderSchedule();
+}
+
+// Projects the next 10 rotation turns onto dates. There's no single "one turn per week" clock
+// in the data model (the rotation advances once per coupon save, and a week can see 0-2 saves
+// across the two products) — so this anchors on Stryktipset's own weekly cadence (its current
+// draw's reg_close_time, then +7 days per turn) since that's the one reliably-weekly product.
+// An estimate, not a guarantee — noted as such in the UI.
+function renderUploaderSchedule() {
+  const el = document.getElementById('uploader-schedule');
+  if (!el) return;
+  const rotation = state.uploader_rotation || [];
+  const draw = drawData.stryktipset;
+  if (!rotation.length || !draw || !draw.reg_close_time) { el.innerHTML = ''; return; }
+
+  const anchor = new Date(draw.reg_close_time);
+  const startIdx = state.uploader_rotation_index || 0;
+  const rows = [];
+  for (let i = 0; i < 10; i++) {
+    const idx = ((startIdx + i) % rotation.length + rotation.length) % rotation.length;
+    const username = rotation[idx];
+    const user = (state.users || []).find(u => u.username === username);
+    const name = user ? user.display_name : username;
+    const date = new Date(anchor.getTime() + i * 7 * 24 * 60 * 60 * 1000);
+    const dateStr = date.toLocaleDateString('sv-SE', { weekday: 'short', day: 'numeric', month: 'short' });
+    rows.push(`<div class="schedule-row${i === 0 ? ' schedule-current' : ''}">
+      <span class="schedule-name"><span class="schedule-turn">#${i + 1}</span>${esc(name)}</span>
+      <span class="schedule-date">${dateStr}</span>
+    </div>`);
+  }
+
+  el.innerHTML = `<div class="card">
+    <div class="card-header"><h2>📅 Nästa 10 speläggarna</h2></div>
+    <div style="font-size:11px;color:var(--muted);padding:0 16px 8px">Uppskattade datum baserat på Stryktipsets veckocykel</div>
+    ${rows.join('')}
+  </div>`;
 }
 
 function drawMetaHtml(draw, product) {
