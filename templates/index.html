@@ -742,30 +742,19 @@ function drawMetaHtml(draw, product) {
   return `<div class="draw-meta"><span>Omgång <b>${draw.draw_number ?? '–'}</b></span><span>Stänger <b>${closeTime}</b></span><span>Pott <b>${pot}</b></span><span style="margin-left:auto">${updatedStr}</span></div>`;
 }
 
-// opts.replaceWeekId set → this coupon already exists; re-decoding replaces it in place
-// (same week id, upserted) instead of creating a duplicate — used for the "upload a new photo"
-// box shown under an already-active coupon (e.g. to fix a bad OCR read).
-function uploadPromptHtml(product, draw, opts) {
-  opts = opts || {};
+function uploadPromptHtml(product, draw) {
   const authed = checkAuth();
   const suggestion = nextUploader();
-  const inputId = opts.replaceWeekId ? `coupon-file-replace-${opts.replaceWeekId}` : `coupon-file-${product}`;
-  const replaceAttr = opts.replaceWeekId ? ` data-replace-week-id="${esc(opts.replaceWeekId)}"` : '';
-  const heading = opts.replaceWeekId ? '📤 Ladda upp ny bild' : PRODUCT_LABELS[product];
-  const body = opts.replaceWeekId
-    ? `<div>Fel på den inlästa kupongen? Ladda upp en ny bild så ersätts den här kupongen.</div>`
-    : `<div>Ingen kupong uppladdad för omgång ${draw.draw_number ?? '–'} än.</div>
-       ${suggestion ? `<div style="margin-top:6px;font-size:12px">Näst på tur: <b>${esc(suggestion)}</b></div>` : ''}`;
-  const btnLabel = opts.replaceWeekId ? '📤 Ladda upp ny bild' : '📤 Ladda upp kupong';
   return `<div class="card">
-    <div class="card-header"><h2>${heading}</h2></div>
+    <div class="card-header"><h2>${PRODUCT_LABELS[product]}</h2></div>
     <div class="upload-zone">
       <div class="icon">📸</div>
-      ${body}
+      <div>Ingen kupong uppladdad för omgång ${draw.draw_number ?? '–'} än.</div>
+      ${suggestion ? `<div style="margin-top:6px;font-size:12px">Näst på tur: <b>${esc(suggestion)}</b></div>` : ''}
       ${authed ? `
         <div style="margin-top:14px">
-          <input type="file" accept="image/*" id="${inputId}"${replaceAttr} style="display:none" onchange="onCouponFileChosen(this)">
-          <button class="btn btn-primary" onclick="document.getElementById('${inputId}').click()">${btnLabel}</button>
+          <input type="file" accept="image/*" id="coupon-file-${product}" style="display:none" onchange="onCouponFileChosen(this)">
+          <button class="btn btn-primary" onclick="document.getElementById('coupon-file-${product}').click()">📤 Ladda upp kupong</button>
         </div>
         <div class="upload-status" style="margin-top:10px;font-size:12px;color:var(--muted)"></div>
       ` : `<div style="margin-top:14px;font-size:12px">Lås upp för att ladda upp en kupong.</div>`}
@@ -927,7 +916,6 @@ function weekCardHtml(week, built, opts) {
   const refreshBtn = opts.showRefresh ? `<button class="btn-ghost" onclick="manualRefresh('${product}', this)" title="Uppdatera nu">🔄</button>` : '';
   const deleteBtn = opts.showDelete ? `<button class="btn-delete" onclick="event.stopPropagation(); deleteWeek('${esc(week.id)}')" title="Ta bort kupong">🗑 Ta bort</button>` : '';
   const payoutTable = payoutTableHtml(product, built.correct);
-  const reuploadSection = opts.showReupload ? uploadPromptHtml(product, draw, { replaceWeekId: week.id }) : '';
   return `
     ${tallyHtml}
     <div class="card">
@@ -940,8 +928,7 @@ function weekCardHtml(week, built, opts) {
       ${built.rowsHtml}
     </div>
     ${payoutBannerHtml(product, built.correct, built.pending)}
-    ${payoutTable ? `<div class="card">${payoutTable}</div>` : ''}
-    ${reuploadSection}`;
+    ${payoutTable ? `<div class="card">${payoutTable}</div>` : ''}`;
 }
 
 function renderKupong() {
@@ -964,7 +951,7 @@ function renderKupong() {
       .sort((a, b) => (b.week.draw_number || 0) - (a.week.draw_number || 0));
 
     if (activeWeeks.length) {
-      activeWeeks.forEach(({ week, built }) => sections.push(weekCardHtml(week, built, { showRefresh: true, showDelete: true, showReupload: true })));
+      activeWeeks.forEach(({ week, built }) => sections.push(weekCardHtml(week, built, { showRefresh: true, showDelete: true })));
     } else if (draw) {
       const hasWeekForCurrentDraw = (state.weeks || []).some(w => (w.product || 'stryktipset') === product && w.draw_number === draw.draw_number);
       if (!hasWeekForCurrentDraw) sections.push(uploadPromptHtml(product, draw));
@@ -993,7 +980,6 @@ function setManualResult(weekId, rowNum, sign) {
 async function onCouponFileChosen(input) {
   const file = input.files[0];
   if (!file) return;
-  const replaceWeekId = input.dataset.replaceWeekId || null;
   const zone = input.closest('.upload-zone');
   const statusEl = zone ? zone.querySelector('.upload-status') : null;
   const btn = zone ? zone.querySelector('.btn-primary') : null;
@@ -1014,7 +1000,6 @@ async function onCouponFileChosen(input) {
     const detectedProduct = PRODUCTS.includes(data.product) ? data.product : selectedProduct;
     const session = getSession();
     decodePreview = {
-      id: replaceWeekId,
       product: detectedProduct,
       system_type: data.system_type || 'Enkelrad',
       rows: data.rows || [],
@@ -1086,9 +1071,14 @@ function releaseDecodePreviewImage() {
 }
 function cancelDecodePreview() { releaseDecodePreviewImage(); decodePreview = null; render(); }
 async function confirmDecodePreview() {
+  // Never create a second week for a product+draw_number that already has one — if a coupon
+  // somehow already exists for this exact draw, saving upserts it in place instead of duplicating.
+  const targetProduct = decodePreview.product || selectedProduct;
+  const existing = (state.weeks || []).find(w =>
+    (w.product || 'stryktipset') === targetProduct && w.draw_number === decodePreview.draw_number);
   const payload = {
-    id: decodePreview.id || undefined,
-    product: decodePreview.product || selectedProduct,
+    id: (existing && existing.id) || undefined,
+    product: targetProduct,
     draw_number: decodePreview.draw_number,
     uploaded_by: decodePreview.uploaded_by,
     system_type: decodePreview.system_type,
