@@ -681,10 +681,20 @@ function deriveResultSign(ev) {
     return 'X';
   } catch { return null; }
 }
+// Explicit rotation order (usernames) + a pointer, persisted in state — not derived from
+// state.weeks.length, which was fragile (a deleted test coupon or an off-cycle upload silently
+// shifted whose turn it was next). The order itself is set by the group, not inferred.
 function nextUploader() {
-  const users = state.users || [];
-  if (!users.length) return '';
-  return users[(state.weeks || []).length % users.length].display_name;
+  const rotation = state.uploader_rotation || [];
+  if (!rotation.length) return '';
+  const idx = ((state.uploader_rotation_index || 0) % rotation.length + rotation.length) % rotation.length;
+  const user = (state.users || []).find(u => u.username === rotation[idx]);
+  return user ? user.display_name : '';
+}
+function advanceUploaderRotation() {
+  const rotation = state.uploader_rotation || [];
+  if (!rotation.length) return;
+  state.uploader_rotation_index = (((state.uploader_rotation_index || 0) + 1) % rotation.length + rotation.length) % rotation.length;
 }
 // A week counts as "active" if any of its rows' matches haven't finished yet (not started, or
 // still live) — active weeks show on the Kupong tab; once every row is finished, it drops off
@@ -1046,9 +1056,11 @@ async function confirmDecodePreview() {
       state.weeks = state.weeks || [];
       const idx = state.weeks.findIndex(w => w.id === data.week.id);
       if (idx !== -1) state.weeks[idx] = data.week; else state.weeks.push(data.week);
+      advanceUploaderRotation();
       releaseDecodePreviewImage();
       decodePreview = null;
       render();
+      saveDataDebounced();
     } else {
       alert('Kunde inte spara: ' + (data.message || 'okänt fel'));
     }

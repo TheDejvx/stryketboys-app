@@ -27,6 +27,11 @@ def get_db():
         print(f'MongoDB error: {e}')
     return _db
 
+# Whose turn it is to upload — an explicit order set by the group, not derived from
+# weeks-uploaded-so-far (that was fragile: deleting a test coupon or an off-cycle upload
+# silently shifted whose turn was next). Index 0 = current turn.
+DEFAULT_UPLOADER_ROTATION = ['tommy', 'olle', 'david', 'victor', 'gustav', 'martin']
+
 def load_data():
     with open(DATA_FILE, 'r', encoding='utf-8') as f:
         fallback = json.load(f)
@@ -35,9 +40,15 @@ def load_data():
         doc = db.stryk_state.find_one({'_id': 'current'})
         if doc:
             doc.pop('_id')
-            return doc
-        db.stryk_state.insert_one({'_id': 'current', **fallback})
-    return fallback
+            data = doc
+        else:
+            db.stryk_state.insert_one({'_id': 'current', **fallback})
+            data = fallback
+    else:
+        data = fallback
+    data.setdefault('uploader_rotation', DEFAULT_UPLOADER_ROTATION)
+    data.setdefault('uploader_rotation_index', 0)
+    return data
 
 def save_data(data):
     db = get_db()

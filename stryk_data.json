@@ -37,5 +37,7 @@
       "must_change_password": true
     }
   ],
-  "weeks": []
+  "weeks": [],
+  "uploader_rotation": ["tommy", "olle", "david", "victor", "gustav", "martin"],
+  "uploader_rotation_index": 0
 }
