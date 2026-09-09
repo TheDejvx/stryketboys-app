@@ -382,8 +382,26 @@ body {
     <!-- STATISTIK -->
     <div class="tab-content" id="tab-statistik">
       <div class="card">
-        <div class="card-header"><h2>📈 Statistik per gubbe</h2></div>
-        <div class="card-body" id="stats-body">
+        <div class="card-header"><h2>📊 Snittresultat</h2></div>
+        <div class="card-body" id="group-average-body">
+          <div class="loading-row">Laddar...</div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-header"><h2>🕐 Senaste resultat</h2></div>
+        <div id="recent-results-body">
+          <div class="loading-row">Laddar...</div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-header"><h2>🏃 Maraton – flest rätt i snitt</h2></div>
+        <div id="marathon-body">
+          <div class="loading-row">Laddar...</div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-header"><h2>🏆 13 rätt-klubben</h2></div>
+        <div id="perfect-weeks-body">
           <div class="loading-row">Laddar...</div>
         </div>
       </div>
@@ -1263,52 +1281,125 @@ function renderHistory() {
 }
 
 // ── STATISTIK ──
+// A week only counts toward averages/the 13-rätt club once every one of its rows is settled —
+// a still-live week's partial tally would otherwise skew both downward misleadingly.
+function isWeekFullySettled(week) {
+  const rowCount = (week.rows || []).length;
+  if (!rowCount) return false;
+  const { total } = weekTally(week);
+  return total === rowCount;
+}
 function computeBoyStats() {
   const stats = {};
-  (state.users || []).forEach(u => stats[u.display_name] = { weeks: 0, correct: 0, total: 0 });
+  (state.users || []).forEach(u => stats[u.display_name] = { weeksUploaded: 0, weeksSettled: 0, correctSum: 0 });
   (state.weeks || []).forEach(w => {
     const name = w.uploaded_by;
     if (!name) return;
-    if (!stats[name]) stats[name] = { weeks: 0, correct: 0, total: 0 };
-    stats[name].weeks++;
-    (w.rows || []).forEach(r => {
-      if (r.settled_result) {
-        stats[name].total++;
-        if ((r.picks || []).includes(r.settled_result)) stats[name].correct++;
-      }
-    });
+    if (!stats[name]) stats[name] = { weeksUploaded: 0, weeksSettled: 0, correctSum: 0 };
+    stats[name].weeksUploaded++;
+    if (isWeekFullySettled(w)) {
+      stats[name].weeksSettled++;
+      stats[name].correctSum += weekTally(w).correct;
+    }
   });
   return stats;
 }
-function renderStats() {
-  const body = document.getElementById('stats-body');
-  const stats = computeBoyStats();
-  const names = Object.keys(stats).filter(n => stats[n].weeks > 0);
-  if (!names.length) {
-    body.innerHTML = `<div class="no-data"><div class="icon">📈</div><div>Ingen statistik tillgänglig än.</div></div>`;
+function settledWeeksSorted() {
+  return (state.weeks || [])
+    .filter(isWeekFullySettled)
+    .slice()
+    .sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
+}
+
+function renderGroupAverage() {
+  const el = document.getElementById('group-average-body');
+  const weeks = settledWeeksSorted();
+  if (!weeks.length) {
+    el.innerHTML = `<div class="no-data"><div class="icon">📊</div><div>Ingen avgjord kupong än.</div></div>`;
     return;
   }
-  names.sort((a, b) => {
-    const pa = stats[a].total ? stats[a].correct / stats[a].total : 0;
-    const pb = stats[b].total ? stats[b].correct / stats[b].total : 0;
-    return pb - pa;
-  });
-  body.innerHTML = `<div class="stats-grid">${names.map(n => {
-    const s = stats[n];
-    const pct = s.total ? Math.round((s.correct / s.total) * 100) : 0;
-    return `<div class="stat-card">
-      <div class="stat-label">${esc(n)}</div>
-      <div class="stat-value">${s.total ? pct + '%' : '–'}</div>
-      <div style="font-size:11px;color:var(--muted);margin-top:2px">${s.weeks} kupong(er)</div>
+  const totalCorrect = weeks.reduce((sum, w) => sum + weekTally(w).correct, 0);
+  const rowCount = weeks[0].rows.length;
+  const avg = totalCorrect / weeks.length;
+  el.innerHTML = `<div class="stat-card" style="max-width:220px">
+    <div class="stat-label">Rätt i snitt</div>
+    <div class="stat-value">${avg.toFixed(1)} / ${rowCount}</div>
+    <div style="font-size:11px;color:var(--muted);margin-top:2px">baserat på ${weeks.length} avgjorda kupong(er)</div>
+  </div>`;
+}
+
+function renderRecentResults() {
+  const el = document.getElementById('recent-results-body');
+  const weeks = [...(state.weeks || [])].sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0)).slice(0, 10);
+  if (!weeks.length) {
+    el.innerHTML = `<div class="no-data"><div class="icon">🕐</div><div>Inga kuponger sparade än.</div></div>`;
+    return;
+  }
+  el.innerHTML = weeks.map(w => {
+    const { correct, total } = weekTally(w);
+    const rowCount = (w.rows || []).length;
+    const settled = isWeekFullySettled(w);
+    const tallyStr = total ? `${correct}/${rowCount} rätt${settled ? '' : ' (pågår)'}` : 'Ej avgjord';
+    const productLabel = PRODUCT_LABELS[w.product || 'stryktipset'] || w.product;
+    return `<div class="schedule-row">
+      <span class="schedule-name">${esc(w.uploaded_by || '–')} <span style="color:var(--muted);font-weight:400">· ${productLabel} v${w.draw_number ?? '–'}</span></span>
+      <span class="schedule-date">${esc(tallyStr)}</span>
     </div>`;
-  }).join('')}</div>`;
+  }).join('');
+}
+
+function renderMarathon() {
+  const el = document.getElementById('marathon-body');
+  const stats = computeBoyStats();
+  const names = Object.keys(stats).filter(n => stats[n].weeksSettled > 0);
+  if (!names.length) {
+    el.innerHTML = `<div class="no-data"><div class="icon">🏃</div><div>Ingen avgjord kupong än.</div></div>`;
+    return;
+  }
+  names.sort((a, b) => (stats[b].correctSum / stats[b].weeksSettled) - (stats[a].correctSum / stats[a].weeksSettled));
+  el.innerHTML = names.map((n, i) => {
+    const s = stats[n];
+    const avg = s.correctSum / s.weeksSettled;
+    return `<div class="schedule-row">
+      <span class="schedule-name"><span class="schedule-turn">#${i + 1}</span>${esc(n)}</span>
+      <span class="schedule-date">${avg.toFixed(1)} rätt i snitt · ${s.weeksSettled} kupong(er)</span>
+    </div>`;
+  }).join('');
+}
+
+function renderPerfectWeeks() {
+  const el = document.getElementById('perfect-weeks-body');
+  const perfect = settledWeeksSorted().filter(w => {
+    const { correct, total } = weekTally(w);
+    return total > 0 && correct === total;
+  });
+  if (!perfect.length) {
+    el.innerHTML = `<div class="no-data"><div class="icon">🏆</div><div>Ingen har fått full pott än.</div></div>`;
+    return;
+  }
+  el.innerHTML = perfect.map(w => {
+    const { total } = weekTally(w);
+    const productLabel = PRODUCT_LABELS[w.product || 'stryktipset'] || w.product;
+    const dateStr = w.created_at ? new Date(w.created_at).toLocaleDateString('sv-SE', { day: 'numeric', month: 'short', year: 'numeric' }) : '';
+    return `<div class="schedule-row">
+      <span class="schedule-name">🎉 ${esc(w.uploaded_by || '–')} <span style="color:var(--muted);font-weight:400">· ${productLabel} v${w.draw_number ?? '–'}</span></span>
+      <span class="schedule-date">${total}/${total} · ${esc(dateStr)}</span>
+    </div>`;
+  }).join('');
+}
+
+function renderStats() {
+  renderGroupAverage();
+  renderRecentResults();
+  renderMarathon();
+  renderPerfectWeeks();
 }
 function renderPlayers() {
   document.getElementById('player-grid').innerHTML = (state.users || []).map(u => {
-    const s = computeBoyStats()[u.display_name] || { weeks: 0 };
+    const s = computeBoyStats()[u.display_name] || { weeksUploaded: 0 };
     return `<div class="player-card">
       <div class="name">${esc(u.display_name)}</div>
-      <div class="share">${s.weeks} kupong(er)</div>
+      <div class="share">${s.weeksUploaded} kupong(er)</div>
     </div>`;
   }).join('');
 }

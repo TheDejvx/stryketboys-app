@@ -118,6 +118,13 @@ This went through several iterations to fix garderade (multi-sign, e.g. X2) rows
 - `POST /api/login` — `{username, password}` → `{status, username, display_name, must_change_password}`. Username match is case-insensitive.
 - `POST /api/change-password` — `{username, current_password, new_password}`, requires the current password to verify, clears `must_change_password`.
 
+## Statistik tab
+All four sections gate on `isWeekFullySettled(week)` (every row has a `settled_result` — i.e. `weekTally(week).total === week.rows.length`) before counting a week toward averages or the perfect-score list, specifically so a still-live week's partial tally can't skew things downward.
+- **Snittresultat** (`renderGroupAverage`) — group-wide average correct count per settled week (not a %, a plain "9.2 / 13" — the row count itself is read off the first settled week, in case that ever isn't 13).
+- **Senaste resultat** (`renderRecentResults`) — last 10 weeks (any state, not just settled — an in-progress week shows "(pågår)"), newest first: uploader + product/draw + tally.
+- **Maraton** (`renderMarathon`) — ranked list by average correct-per-settled-week per uploader (`computeBoyStats()`: `correctSum / weeksSettled`), not by aggregate accuracy % like the old "Statistik per gubbe" grid it replaced — "flest rätt i snitt" is specifically about per-week average, a different number than lifetime pick accuracy.
+- **13 rätt-klubben** (`renderPerfectWeeks`) — every fully-settled week where `correct === total` (a full sweep of however many rows that week had, not hardcoded to 13, though that's what it'll be for a normal coupon).
+
 ## Accounts
 Six accounts, seeded via `seed_users.py` (rerun it to reset everyone's password — it overwrites the whole `users` list, preserving `weeks`): username = first name, initial password = surname (lowercase). Every account starts with `must_change_password: true`; the frontend's login modal forces a password-change step before granting a session — it withholds `setSession()` until that completes, so there's no way to end up logged in while still on the seed password. Sessions live in `localStorage` (`stryk_session`) for 30 days. Viewing the app (Kupong/Historik/Statistik) needs no login; uploading a coupon or manually setting a `settled_result` does, and attributes the action to whoever's logged in — no more free-text uploader picker.
 
