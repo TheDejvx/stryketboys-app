@@ -250,10 +250,14 @@ body {
 .auth-error { color: var(--danger); font-size: 13px; margin-top: 8px; display: none; }
 
 /* ── HISTORIK / STATISTIK ── */
+.week-card { border-bottom: 1px solid var(--border); }
+.week-card:last-child { border-bottom: none; }
 .week-card-header { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; cursor: pointer; }
 .week-card-title { font-weight: 700; font-size: 13.5px; }
 .week-card-sub { font-size: 11px; color: var(--muted); margin-top: 2px; }
 .week-tally { font-size: 13px; font-weight: 700; color: var(--primary-dark); }
+.expand-caret { font-size: 10px; color: var(--muted); }
+.week-detail { border-top: 1px solid var(--border); background: var(--light-bg); }
 
 .stats-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
 @media (min-width: 480px) { .stats-grid { grid-template-columns: repeat(3, 1fr); } }
@@ -305,36 +309,8 @@ body {
     <!-- KUPONG -->
     <div class="tab-content active" id="tab-kupong">
 
-      <div class="payout-banner" id="payout-banner" style="display:none"></div>
-
-      <div class="summary-bar" id="tally-bar" style="display:none">
-        <div class="summary-item">
-          <div class="label">Rätt</div>
-          <div class="value positive" id="tally-correct">–</div>
-        </div>
-        <div class="summary-item">
-          <div class="label">Fel</div>
-          <div class="value negative" id="tally-wrong">–</div>
-        </div>
-        <div class="summary-item">
-          <div class="label">Kvar</div>
-          <div class="value" id="tally-pending">–</div>
-        </div>
-      </div>
-
-      <div class="card">
-        <div class="card-header">
-          <h2 id="kupong-title">🎟️ Denna veckans kupong</h2>
-          <div style="display:flex;align-items:center;gap:8px">
-            <span class="matches-meta" id="draw-updated"></span>
-            <button class="btn-ghost" id="refresh-draw-btn" onclick="manualRefresh()" title="Uppdatera nu">🔄</button>
-            <button class="btn-delete" id="delete-week-btn" style="display:none" onclick="deleteCurrentWeek()" title="Ta bort kupong">🗑 Ta bort</button>
-          </div>
-        </div>
-        <div class="draw-meta" id="draw-meta"></div>
-        <div id="kupong-body">
-          <div class="loading-row">Laddar...</div>
-        </div>
+      <div id="kupong-list">
+        <div class="card"><div class="loading-row">Laddar...</div></div>
       </div>
 
       <div class="install-card">
@@ -627,7 +603,6 @@ async function loadDraw(product) {
   render();
 }
 async function refreshDraw(product) {
-  product = product || selectedProduct;
   try {
     const r = await fetch(`/api/refresh-draw?product=${product}`, { method: 'POST' });
     const data = await r.json();
@@ -637,19 +612,19 @@ async function refreshDraw(product) {
   } catch (e) { console.error(e); }
   render();
 }
-async function manualRefresh() {
-  const btn = document.getElementById('refresh-draw-btn');
+async function manualRefresh(product, btn) {
   if (btn) { btn.disabled = true; btn.textContent = '⏳'; }
-  await refreshDraw(selectedProduct);
+  await refreshDraw(product);
   if (btn) { btn.disabled = false; btn.textContent = '🔄'; }
 }
-// Poll the currently viewed product's draw so live status/scores update without a manual
-// reload — the server already caches upstream data and self-throttles its own poll speed
-// based on whether a match is live, so this client poll is just cheap re-reads of that cache.
-setInterval(() => { loadDraw(selectedProduct); }, 20000);
+// Poll both products' cached draws so live status/scores update without a manual reload — both
+// can have an active coupon shown at once now, so both need to stay fresh. The server already
+// caches upstream data and self-throttles its own poll speed based on whether a match is live,
+// so this client poll is just cheap re-reads of that cache.
+setInterval(() => { PRODUCTS.forEach(loadDraw); }, 20000);
 // ── HELPERS ──
 function esc(s) { return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
-function findEvent(matchId) { return (drawData[selectedProduct]?.events || []).find(e => e.match_id === matchId) || null; }
+function findEvent(matchId, product) { return (drawData[product]?.events || []).find(e => e.match_id === matchId) || null; }
 function fmtKickoff(iso) {
   if (!iso) return '';
   try {
@@ -674,8 +649,8 @@ function isLive(ev) {
   if (s === 'notstarted' || st.includes('inte startat')) return false;
   return /live|inprogress|\bstarted\b|half/.test(s) || /pågår|paus/.test(st);
 }
-// Prefer the official settled outcome (drawPayout[selectedProduct].outcomes[matchId]) once
-// Svenska Spel finalizes the draw — exact, no guessing. This score-based derivation is only
+// Prefer the official settled outcome (drawResult[product].outcomes[matchId], see buildWeekRows)
+// once Svenska Spel finalizes the draw — exact, no guessing. This score-based derivation is only
 // the live/pre-finalization fallback. Verified against a real finished match (draw 4969):
 // match.result is an array of {sportEventResultType, home, away}; the Fulltime entry's
 // home/away are the final score strings.
@@ -698,11 +673,10 @@ function nextUploader() {
   if (!users.length) return '';
   return users[(state.weeks || []).length % users.length].display_name;
 }
-function currentWeek() {
-  const draw = drawData[selectedProduct];
-  if (!draw) return null;
-  return (state.weeks || []).find(w => (w.product || 'stryktipset') === selectedProduct && w.draw_number === draw.draw_number) || null;
-}
+// A week counts as "active" if any of its rows' matches haven't finished yet (not started, or
+// still live) — active weeks show on the Kupong tab; once every row is finished, it drops off
+// Kupong and only lives in Historik.
+function weekById(weekId) { return (state.weeks || []).find(w => w.id === weekId) || null; }
 
 // ── TABS ──
 function switchTab(name) {
@@ -715,81 +689,56 @@ function switchTab(name) {
 // ── RENDER ──
 function render() {
   updateAuthUI();
-  renderDrawMeta();
   renderKupong();
   renderHistory();
   renderStats();
   renderPlayers();
 }
 
-function renderDrawMeta() {
-  const el = document.getElementById('draw-meta');
-  const upd = document.getElementById('draw-updated');
-  const draw = drawData[selectedProduct];
-  if (!draw) { el.innerHTML = ''; if (upd) upd.textContent = ''; return; }
+function drawMetaHtml(draw, product) {
   const closeTime = draw.reg_close_time ? new Date(draw.reg_close_time).toLocaleString('sv-SE', { day:'numeric', month:'short', hour:'2-digit', minute:'2-digit', timeZone:'Europe/Stockholm' }) : '–';
   const pot = draw.current_net_sale ? Number(draw.current_net_sale.replace(/\s/g,'').replace(',', '.')).toLocaleString('sv-SE') + ' kr' : '–';
-  el.innerHTML = `<span>Omgång <b>${draw.draw_number ?? '–'}</b></span><span>Stänger <b>${closeTime}</b></span><span>Pott <b>${pot}</b></span>`;
-  const updated = drawUpdated[selectedProduct];
-  if (upd) upd.textContent = updated ? 'Uppdaterad ' + new Date(updated).toLocaleTimeString('sv-SE', { hour: '2-digit', minute: '2-digit' }) : '';
+  const updated = drawUpdated[product];
+  const updatedStr = updated ? 'Uppdaterad ' + new Date(updated).toLocaleTimeString('sv-SE', { hour: '2-digit', minute: '2-digit' }) : '';
+  return `<div class="draw-meta"><span>Omgång <b>${draw.draw_number ?? '–'}</b></span><span>Stänger <b>${closeTime}</b></span><span>Pott <b>${pot}</b></span><span style="margin-left:auto">${updatedStr}</span></div>`;
 }
 
-function renderKupong() {
-  const body = document.getElementById('kupong-body');
-  const tallyBar = document.getElementById('tally-bar');
+function uploadPromptHtml(product, draw) {
+  const authed = checkAuth();
+  const suggestion = nextUploader();
+  return `<div class="card">
+    <div class="card-header"><h2>${PRODUCT_LABELS[product]}</h2></div>
+    <div class="upload-zone">
+      <div class="icon">📸</div>
+      <div>Ingen kupong uppladdad för omgång ${draw.draw_number ?? '–'} än.</div>
+      ${suggestion ? `<div style="margin-top:6px;font-size:12px">Näst på tur: <b>${esc(suggestion)}</b></div>` : ''}
+      ${authed ? `
+        <div style="margin-top:14px">
+          <input type="file" accept="image/*" id="coupon-file-${product}" style="display:none" onchange="onCouponFileChosen(this)">
+          <button class="btn btn-primary" onclick="document.getElementById('coupon-file-${product}').click()">📤 Ladda upp kupong</button>
+        </div>
+        <div class="upload-status" style="margin-top:10px;font-size:12px;color:var(--muted)"></div>
+      ` : `<div style="margin-top:14px;font-size:12px">Lås upp för att ladda upp en kupong.</div>`}
+    </div>
+  </div>`;
+}
 
-  if (decodePreview) {
-    tallyBar.style.display = 'none';
-    document.getElementById('payout-banner').style.display = 'none';
-    document.getElementById('delete-week-btn').style.display = 'none';
-    body.innerHTML = decodePreviewHtml();
-    return;
-  }
-
-  const draw = drawData[selectedProduct];
-  if (!draw) {
-    tallyBar.style.display = 'none';
-    document.getElementById('payout-banner').style.display = 'none';
-    document.getElementById('delete-week-btn').style.display = 'none';
-    body.innerHTML = `<div class="loading-row">Hämtar aktuell omgång...</div>`;
-    return;
-  }
-
-  const week = currentWeek();
-  if (!week) {
-    tallyBar.style.display = 'none';
-    document.getElementById('payout-banner').style.display = 'none';
-    document.getElementById('delete-week-btn').style.display = 'none';
-    const authed = checkAuth();
-    const suggestion = nextUploader();
-    body.innerHTML = `
-      <div class="upload-zone">
-        <div class="icon">📸</div>
-        <div>Ingen kupong uppladdad för omgång ${draw.draw_number ?? '–'} än.</div>
-        ${suggestion ? `<div style="margin-top:6px;font-size:12px">Näst på tur: <b>${esc(suggestion)}</b></div>` : ''}
-        ${authed ? `
-          <div style="margin-top:14px">
-            <input type="file" accept="image/*" id="coupon-file" style="display:none" onchange="onCouponFileChosen()">
-            <button class="btn btn-primary" id="upload-btn" onclick="document.getElementById('coupon-file').click()">📤 Ladda upp kupong</button>
-          </div>
-          <div id="upload-status" style="margin-top:10px;font-size:12px;color:var(--muted)"></div>
-        ` : `<div style="margin-top:14px;font-size:12px">Lås upp för att ladda upp en kupong.</div>`}
-      </div>`;
-    return;
-  }
-
-  // Render current saved week's rows, cross-referenced against live draw data
-  let correct = 0, wrong = 0, pending = 0;
-  let changed = false;
+// Settles a week's rows against its own product's live draw data (mutating settled_result as
+// matches finish) and builds the row list markup. Shared by the Kupong active-list and the
+// Historik detail expand, so both show identical, always-current row state.
+function buildWeekRows(week) {
+  const product = week.product || 'stryktipset';
+  let correct = 0, wrong = 0, pending = 0, changed = false, allFinished = true;
 
   const rowsHtml = (week.rows || []).map(row => {
-    const ev = findEvent(row.match_id);
+    const ev = findEvent(row.match_id, product);
     const finished = isFinished(ev);
     const live = isLive(ev);
+    if (!finished) allFinished = false;
 
     // Once Svenska Spel finalizes the draw, its official outcome always wins over our own
     // score-derived guess (and can correct an earlier live-derived or manual entry).
-    const official = drawResult[selectedProduct]?.outcomes?.[String(row.match_id)];
+    const official = drawResult[product]?.outcomes?.[String(row.match_id)];
     if (finished) {
       if (official && row.settled_result !== official) {
         row.settled_result = official;
@@ -838,7 +787,7 @@ function renderKupong() {
 
     const manualPicker = (finished && !row.settled_result) ? `
       <div class="match-pills" style="margin-top:4px">
-        ${['1','X','2'].map(s => `<span class="pick-pill editable" onclick="setManualResult(${row.row_num},'${s}')">${s}</span>`).join('')}
+        ${['1','X','2'].map(s => `<span class="pick-pill editable" onclick="setManualResult('${esc(week.id)}',${row.row_num},'${s}')">${s}</span>`).join('')}
       </div>` : '';
 
     return `<div class="match-row">
@@ -855,47 +804,28 @@ function renderKupong() {
     </div>`;
   }).join('');
 
-  const total = (week.rows || []).length;
-  document.getElementById('kupong-title').textContent = `🎟️ ${PRODUCT_LABELS[selectedProduct]} v${draw.draw_number ?? ''} – ${esc(week.uploaded_by || '')} · ${correct}/${total} rätt`;
-  document.getElementById('delete-week-btn').style.display = '';
-  tallyBar.style.display = '';
-  document.getElementById('tally-correct').textContent = correct;
-  document.getElementById('tally-wrong').textContent = wrong;
-  document.getElementById('tally-pending').textContent = pending;
-
-  renderPayoutBanner(correct, pending);
-
-  body.innerHTML = `<div class="matches-meta" style="padding:8px 16px;color:var(--muted);font-size:11px">${esc(week.system_type || 'Enkelrad')}</div>` + rowsHtml + payoutTableHtml(correct);
-
-  if (changed) saveDataDebounced();
+  return { rowsHtml, correct, wrong, pending, changed, allFinished };
 }
 
 // Svenska Spel only publishes real payout numbers once the whole draw is finalized (all 13
 // matches done + verified — this lags kickoff by hours, sometimes not same-day). There's no
 // live/preliminary payout data to show before that — so pending is shown honestly rather than
 // faked with a guessed number.
-function renderPayoutBanner(correct, pending) {
-  const el = document.getElementById('payout-banner');
-  const distribution = drawResult[selectedProduct]?.distribution;
+function payoutBannerHtml(product, correct, pending) {
+  const distribution = drawResult[product]?.distribution;
   if (!distribution || !distribution.length) {
-    el.className = 'payout-banner pending';
-    el.textContent = pending > 0 ? 'Utdelning fastställs efter alla matcher' : 'Utdelning fastställs inom kort (Svenska Spel verifierar resultatet)';
-    el.style.display = '';
-    return;
+    const msg = pending > 0 ? 'Utdelning fastställs efter alla matcher' : 'Utdelning fastställs inom kort (Svenska Spel verifierar resultatet)';
+    return `<div class="payout-banner pending">${msg}</div>`;
   }
   const tier = distribution.find(t => t.correct === correct);
   if (tier) {
-    el.className = 'payout-banner win';
-    el.textContent = `🏆 Nuvarande utdelning: ${fmtKr(tier.amount)} (${correct} rätt, ${tier.winners} vinnare)`;
-  } else {
-    el.className = 'payout-banner none';
-    el.textContent = `Ingen vinst denna omgång (${correct} rätt)`;
+    return `<div class="payout-banner win">🏆 Nuvarande utdelning: ${fmtKr(tier.amount)} (${correct} rätt, ${tier.winners} vinnare)</div>`;
   }
-  el.style.display = '';
+  return `<div class="payout-banner none">Ingen vinst denna omgång (${correct} rätt)</div>`;
 }
 
-function payoutTableHtml(correct) {
-  const distribution = drawResult[selectedProduct]?.distribution;
+function payoutTableHtml(product, correct) {
+  const distribution = drawResult[product]?.distribution;
   if (!distribution || !distribution.length) return '';
   const rows = [...distribution].sort((a, b) => b.correct - a.correct).map(t => {
     const mine = t.correct === correct;
@@ -915,9 +845,73 @@ function fmtKr(amount) {
   return amount == null ? '–' : Math.round(amount).toLocaleString('sv-SE') + ' kr';
 }
 
-function setManualResult(rowNum, sign) {
+// Full self-contained card for one week: banner + tally + rows + payout table. Used both for
+// the Kupong tab's active-coupon list and Historik's expand-to-detail view.
+function weekCardHtml(week, built, opts) {
+  opts = opts || {};
+  const product = week.product || 'stryktipset';
+  const draw = drawData[product];
+  const total = (week.rows || []).length;
+  const title = `🎟️ ${PRODUCT_LABELS[product] || product} v${week.draw_number ?? '–'} – ${esc(week.uploaded_by || '')} · ${built.correct}/${total} rätt`;
+  const tallyHtml = `
+    <div class="summary-bar">
+      <div class="summary-item"><div class="label">Rätt</div><div class="value positive">${built.correct}</div></div>
+      <div class="summary-item"><div class="label">Fel</div><div class="value negative">${built.wrong}</div></div>
+      <div class="summary-item"><div class="label">Kvar</div><div class="value">${built.pending}</div></div>
+    </div>`;
+  const refreshBtn = opts.showRefresh ? `<button class="btn-ghost" onclick="manualRefresh('${product}', this)" title="Uppdatera nu">🔄</button>` : '';
+  const deleteBtn = opts.showDelete ? `<button class="btn-delete" onclick="event.stopPropagation(); deleteWeek('${esc(week.id)}')" title="Ta bort kupong">🗑 Ta bort</button>` : '';
+  return `
+    ${payoutBannerHtml(product, built.correct, built.pending)}
+    ${tallyHtml}
+    <div class="card">
+      <div class="card-header">
+        <h2>${esc(title)}</h2>
+        <div style="display:flex;align-items:center;gap:8px">${refreshBtn}${deleteBtn}</div>
+      </div>
+      ${draw ? drawMetaHtml(draw, product) : ''}
+      <div class="matches-meta" style="padding:8px 16px;color:var(--muted);font-size:11px">${esc(week.system_type || 'Enkelrad')}</div>
+      ${built.rowsHtml}
+      ${payoutTableHtml(product, built.correct)}
+    </div>`;
+}
+
+function renderKupong() {
+  const container = document.getElementById('kupong-list');
+  if (!container) return;
+
+  if (decodePreview) {
+    container.innerHTML = `<div class="card">${decodePreviewHtml()}</div>`;
+    return;
+  }
+
+  let anyChanged = false;
+  const sections = [];
+  for (const product of PRODUCTS) {
+    const draw = drawData[product];
+    const activeWeeks = (state.weeks || [])
+      .filter(w => (w.product || 'stryktipset') === product)
+      .map(w => ({ week: w, built: buildWeekRows(w) }))
+      .filter(({ built }) => { if (built.changed) anyChanged = true; return !built.allFinished; })
+      .sort((a, b) => (b.week.draw_number || 0) - (a.week.draw_number || 0));
+
+    if (activeWeeks.length) {
+      activeWeeks.forEach(({ week, built }) => sections.push(weekCardHtml(week, built, { showRefresh: true, showDelete: true })));
+    } else if (draw) {
+      const hasWeekForCurrentDraw = (state.weeks || []).some(w => (w.product || 'stryktipset') === product && w.draw_number === draw.draw_number);
+      if (!hasWeekForCurrentDraw) sections.push(uploadPromptHtml(product, draw));
+    } else {
+      sections.push(`<div class="card"><div class="loading-row">Hämtar ${PRODUCT_LABELS[product]}...</div></div>`);
+    }
+  }
+
+  container.innerHTML = sections.length ? sections.join('') : `<div class="card"><div class="no-data"><div class="icon">🎟️</div><div>Inga aktiva kuponger just nu.</div></div></div>`;
+  if (anyChanged) saveDataDebounced();
+}
+
+function setManualResult(weekId, rowNum, sign) {
   requireAuth(() => {
-    const week = currentWeek();
+    const week = weekById(weekId);
     if (!week) return;
     const row = (week.rows || []).find(r => r.row_num === rowNum);
     if (!row) return;
@@ -928,12 +922,12 @@ function setManualResult(rowNum, sign) {
 }
 
 // ── COUPON UPLOAD / DECODE ──
-async function onCouponFileChosen() {
-  const input = document.getElementById('coupon-file');
+async function onCouponFileChosen(input) {
   const file = input.files[0];
   if (!file) return;
-  const statusEl = document.getElementById('upload-status');
-  const btn = document.getElementById('upload-btn');
+  const zone = input.closest('.upload-zone');
+  const statusEl = zone ? zone.querySelector('.upload-status') : null;
+  const btn = zone ? zone.querySelector('.btn-primary') : null;
   if (statusEl) statusEl.textContent = 'Analyserar kupong... (kan ta en stund)';
   if (btn) { btn.disabled = true; btn.textContent = '⏳ Analyserar...'; }
 
@@ -949,7 +943,6 @@ async function onCouponFileChosen() {
       return;
     }
     const detectedProduct = PRODUCTS.includes(data.product) ? data.product : selectedProduct;
-    if (detectedProduct !== selectedProduct) selectedProduct = detectedProduct; // switch to whichever tab matches the coupon
     const session = getSession();
     decodePreview = {
       product: detectedProduct,
@@ -1055,17 +1048,19 @@ async function confirmDecodePreview() {
 function deleteWeek(weekId) {
   requireAuth(() => {
     if (!confirm('Ta bort denna kupong? Går inte att ångra.')) return;
+    expandedWeeks.delete(weekId);
     state.weeks = (state.weeks || []).filter(w => w.id !== weekId);
     render();
     saveData();
   });
 }
-function deleteCurrentWeek() {
-  const week = currentWeek();
-  if (week) deleteWeek(week.id);
-}
 
 // ── HISTORIK ──
+let expandedWeeks = new Set();
+function toggleWeekDetail(weekId) {
+  if (expandedWeeks.has(weekId)) expandedWeeks.delete(weekId); else expandedWeeks.add(weekId);
+  renderHistory();
+}
 function weekTally(week) {
   let correct = 0, total = 0;
   (week.rows || []).forEach(r => { if (r.settled_result) { total++; if ((r.picks || []).includes(r.settled_result)) correct++; } });
@@ -1079,21 +1074,40 @@ function renderHistory() {
     body.innerHTML = `<div class="no-data"><div class="icon">📜</div><div>Inga kuponger sparade än.</div></div>`;
     return;
   }
+  let anyChanged = false;
   body.innerHTML = weeks.map(w => {
     const { correct, total } = weekTally(w);
     const tallyStr = total ? `${correct}/${total} rätt` : 'Ej avgjord';
     const productLabel = PRODUCT_LABELS[w.product || 'stryktipset'] || w.product;
-    return `<div class="week-card-header">
-      <div>
-        <div class="week-card-title">${productLabel} · Omgång ${w.draw_number ?? '–'}</div>
-        <div class="week-card-sub">${esc(w.uploaded_by || '')} · ${esc(w.system_type || 'Enkelrad')}</div>
+    const expanded = expandedWeeks.has(w.id);
+    let detailHtml = '';
+    if (expanded) {
+      const product = w.product || 'stryktipset';
+      const built = buildWeekRows(w);
+      if (built.changed) anyChanged = true;
+      detailHtml = `<div class="week-detail">
+        ${payoutBannerHtml(product, built.correct, built.pending)}
+        <div class="matches-meta" style="padding:8px 16px;color:var(--muted);font-size:11px">${esc(w.system_type || 'Enkelrad')}</div>
+        ${built.rowsHtml}
+        ${payoutTableHtml(product, built.correct)}
+      </div>`;
+    }
+    return `<div class="week-card">
+      <div class="week-card-header" onclick="toggleWeekDetail('${esc(w.id)}')">
+        <div>
+          <div class="week-card-title">${productLabel} · Omgång ${w.draw_number ?? '–'}</div>
+          <div class="week-card-sub">${esc(w.uploaded_by || '')} · ${esc(w.system_type || 'Enkelrad')}</div>
+        </div>
+        <div style="display:flex;align-items:center;gap:10px">
+          <div class="week-tally">${tallyStr}</div>
+          <span class="expand-caret">${expanded ? '▲' : '▼'}</span>
+          <button class="btn-delete" onclick="event.stopPropagation(); deleteWeek('${esc(w.id)}')" title="Ta bort kupong">🗑</button>
+        </div>
       </div>
-      <div style="display:flex;align-items:center;gap:10px">
-        <div class="week-tally">${tallyStr}</div>
-        <button class="btn-delete" onclick="deleteWeek('${esc(w.id)}')" title="Ta bort kupong">🗑</button>
-      </div>
+      ${detailHtml}
     </div>`;
   }).join('');
+  if (anyChanged) saveDataDebounced();
 }
 
 // ── STATISTIK ──
