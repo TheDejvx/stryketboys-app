@@ -115,6 +115,20 @@ def extract_live_minute(m):
                 return val
     return None
 
+def _last_saved_draw_number(product):
+    """Cold-start fallback for fetch_draw()'s closed/live-draw case: this process's in-memory
+    cache is empty (fresh start or redeploy), so fall back to whatever draw number the most
+    recently saved coupon for this product used — reliable since a coupon only ever gets
+    uploaded for the currently open/just-closed draw."""
+    try:
+        weeks = [w for w in load_data().get('weeks', []) if w.get('product', 'stryktipset') == product]
+        if not weeks:
+            return None
+        return max((w.get('draw_number') for w in weeks if w.get('draw_number')), default=None)
+    except Exception as e:
+        print(f'_last_saved_draw_number error ({product}): {e}')
+        return None
+
 def fetch_draw(product='stryktipset'):
     """Pull the current draw (matches, odds, live status) for the given product
     ('stryktipset' or 'europatipset') from Svenska Spel's public draws API — no
@@ -137,8 +151,11 @@ def fetch_draw(product='stryktipset'):
             # while its matches are actively being played. Without this fallback, fetch_draw()
             # would just keep returning the stale pre-kickoff cache for the entire live window.
             # The single-draw endpoint keeps working (and keeps reflecting live status/scores)
-            # as long as we already know the draw number from when it was still open.
-            last_known = (_draw_cache[product] or {}).get('draw_number')
+            # as long as we know the draw number from when it was still open — from our own
+            # in-memory cache if this process has been running since then, or (crucially, since
+            # a redeploy wipes that cache — which is exactly what happened mid-live-window while
+            # building this fix) from the most recent saved coupon for this product as a fallback.
+            last_known = (_draw_cache[product] or {}).get('draw_number') or _last_saved_draw_number(product)
             if last_known:
                 r2 = req.get(f'https://api.spela.svenskaspel.se/draw/1/{product}/draws/{last_known}',
                               headers={'User-Agent': 'Mozilla/5.0'}, timeout=15)
