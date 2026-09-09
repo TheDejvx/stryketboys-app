@@ -117,6 +117,20 @@ body {
 .summary-item .value.positive { color: var(--win); }
 .summary-item .value.negative { color: var(--loss); }
 
+/* ── PAYOUT ── */
+.payout-banner { border-radius: 12px; padding: 12px 16px; margin-bottom: 16px; font-size: 14px; font-weight: 700; text-align: center; }
+.payout-banner.win { background: var(--win-bg); color: var(--win); }
+.payout-banner.none { background: var(--loss-bg); color: var(--loss); }
+.payout-banner.pending { background: var(--white); color: var(--muted); box-shadow: 0 2px 10px rgba(0,0,0,.08); font-weight: 600; }
+.payout-table { margin: 8px 16px 16px; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+.payout-table table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.payout-table th, .payout-table td { padding: 8px 10px; text-align: right; }
+.payout-table th:first-child, .payout-table td:first-child { text-align: left; }
+.payout-table thead { background: var(--light-bg); color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .4px; }
+.payout-table tbody tr { border-top: 1px solid var(--border); }
+.payout-table tbody tr.your-tier { background: var(--win-bg); font-weight: 700; }
+.payout-table-title { padding: 12px 16px 0; font-size: 11px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .4px; }
+
 /* ── DRAW META ── */
 .draw-meta { display: flex; justify-content: space-between; align-items: center; padding: 10px 16px; font-size: 12px; color: var(--muted); border-bottom: 1px solid var(--border); flex-wrap: wrap; gap: 6px; }
 .draw-meta b { color: var(--text); }
@@ -290,6 +304,8 @@ body {
 
     <!-- KUPONG -->
     <div class="tab-content active" id="tab-kupong">
+
+      <div class="payout-banner" id="payout-banner" style="display:none"></div>
 
       <div class="summary-bar" id="tally-bar" style="display:none">
         <div class="summary-item">
@@ -563,6 +579,7 @@ let selectedProduct = 'stryktipset';
 let state = { users: [], weeks: [] };
 let drawData = { stryktipset: null, europatipset: null };
 let drawUpdated = { stryktipset: null, europatipset: null };
+let drawResult = { stryktipset: null, europatipset: null }; // { draw_number, outcomes: {matchId: sign}, distribution: [{correct,winners,amount}] } once finalized
 let decodePreview = null; // { system_type, rows, draw_number, product } while reviewing an upload, before save
 let saveTimer = null;
 
@@ -605,6 +622,7 @@ async function loadDraw(product) {
     const data = await r.json();
     drawData[product] = data.draw;
     drawUpdated[product] = data.last_updated;
+    drawResult[product] = data.result;
   } catch (e) { console.error('loadDraw', product, e); }
   render();
 }
@@ -615,6 +633,7 @@ async function refreshDraw(product) {
     const data = await r.json();
     drawData[product] = data.draw;
     drawUpdated[product] = data.last_updated;
+    drawResult[product] = data.result;
   } catch (e) { console.error(e); }
   render();
 }
@@ -641,30 +660,33 @@ function isFinished(ev) {
   if (!ev) return false;
   const s = (ev.sport_event_status || '').toLowerCase();
   const st = (ev.status || '').toLowerCase();
-  return /end|finish|final/.test(s) || /avslutad|slut/.test(st);
+  return /\b(ended|finished|final)\b/.test(s) || /avslutad|\bslut\b/.test(st);
 }
+// Confirmed field values (from a real finished match, draw 4969): sportEventStatus is
+// "NotStarted" pre-kickoff, "Ended" once done — note "NotStarted" contains the substring
+// "started", which a naive /started/ regex would wrongly match, showing "Pågår" for games
+// that hadn't kicked off yet. Fixed with \b word-boundary matching plus a kickoff-time guard.
 function isLive(ev) {
   if (!ev || isFinished(ev)) return false;
+  if (ev.match_start && new Date(ev.match_start) > new Date()) return false;
   const s = (ev.sport_event_status || '').toLowerCase();
   const st = (ev.status || '').toLowerCase();
-  return /live|progress|started|half/.test(s) || /pågår|paus/.test(st);
+  if (s === 'notstarted' || st.includes('inte startat')) return false;
+  return /live|inprogress|\bstarted\b|half/.test(s) || /pågår|paus/.test(st);
 }
-// Best-effort derivation of the final 1/X/2 sign from the API's `result` field.
-// Schema is unverified against a real live match — falls back to null (manual entry) if unrecognized.
+// Prefer the official settled outcome (drawPayout[selectedProduct].outcomes[matchId]) once
+// Svenska Spel finalizes the draw — exact, no guessing. This score-based derivation is only
+// the live/pre-finalization fallback. Verified against a real finished match (draw 4969):
+// match.result is an array of {sportEventResultType, home, away}; the Fulltime entry's
+// home/away are the final score strings.
 function deriveResultSign(ev) {
   const res = ev && ev.result;
-  if (!res) return null;
+  if (!res || !Array.isArray(res) || !res.length) return null;
   try {
-    let entry = null;
-    if (Array.isArray(res)) {
-      if (!res.length) return null;
-      entry = res.find(r => /full ?time|match|ft/i.test(r.type || r.period || '')) || res[res.length - 1];
-    } else if (typeof res === 'object') {
-      entry = res;
-    }
+    const entry = res.find(r => r.sportEventResultType === 'Fulltime') || res[res.length - 1];
     if (!entry) return null;
-    const h = entry.homeScore ?? entry.home ?? entry.homeGoals ?? entry.h;
-    const a = entry.awayScore ?? entry.away ?? entry.awayGoals ?? entry.a;
+    const h = entry.home;
+    const a = entry.away;
     if (h == null || a == null) return null;
     if (Number(h) > Number(a)) return '1';
     if (Number(h) < Number(a)) return '2';
@@ -718,6 +740,7 @@ function renderKupong() {
 
   if (decodePreview) {
     tallyBar.style.display = 'none';
+    document.getElementById('payout-banner').style.display = 'none';
     document.getElementById('delete-week-btn').style.display = 'none';
     body.innerHTML = decodePreviewHtml();
     return;
@@ -726,6 +749,7 @@ function renderKupong() {
   const draw = drawData[selectedProduct];
   if (!draw) {
     tallyBar.style.display = 'none';
+    document.getElementById('payout-banner').style.display = 'none';
     document.getElementById('delete-week-btn').style.display = 'none';
     body.innerHTML = `<div class="loading-row">Hämtar aktuell omgång...</div>`;
     return;
@@ -734,6 +758,7 @@ function renderKupong() {
   const week = currentWeek();
   if (!week) {
     tallyBar.style.display = 'none';
+    document.getElementById('payout-banner').style.display = 'none';
     document.getElementById('delete-week-btn').style.display = 'none';
     const authed = checkAuth();
     const suggestion = nextUploader();
@@ -762,9 +787,17 @@ function renderKupong() {
     const finished = isFinished(ev);
     const live = isLive(ev);
 
-    if (finished && !row.settled_result) {
-      const auto = deriveResultSign(ev);
-      if (auto) { row.settled_result = auto; changed = true; }
+    // Once Svenska Spel finalizes the draw, its official outcome always wins over our own
+    // score-derived guess (and can correct an earlier live-derived or manual entry).
+    const official = drawResult[selectedProduct]?.outcomes?.[String(row.match_id)];
+    if (finished) {
+      if (official && row.settled_result !== official) {
+        row.settled_result = official;
+        changed = true;
+      } else if (!row.settled_result) {
+        const auto = deriveResultSign(ev);
+        if (auto) { row.settled_result = auto; changed = true; }
+      }
     }
     // While a match is still in progress, derive a *provisional* sign from the live score so
     // the running tally reflects the current standing — but never write it to row.settled_result,
@@ -830,9 +863,56 @@ function renderKupong() {
   document.getElementById('tally-wrong').textContent = wrong;
   document.getElementById('tally-pending').textContent = pending;
 
-  body.innerHTML = `<div class="matches-meta" style="padding:8px 16px;color:var(--muted);font-size:11px">${esc(week.system_type || 'Enkelrad')}</div>` + rowsHtml;
+  renderPayoutBanner(correct, pending);
+
+  body.innerHTML = `<div class="matches-meta" style="padding:8px 16px;color:var(--muted);font-size:11px">${esc(week.system_type || 'Enkelrad')}</div>` + rowsHtml + payoutTableHtml(correct);
 
   if (changed) saveDataDebounced();
+}
+
+// Svenska Spel only publishes real payout numbers once the whole draw is finalized (all 13
+// matches done + verified — this lags kickoff by hours, sometimes not same-day). There's no
+// live/preliminary payout data to show before that — so pending is shown honestly rather than
+// faked with a guessed number.
+function renderPayoutBanner(correct, pending) {
+  const el = document.getElementById('payout-banner');
+  const distribution = drawResult[selectedProduct]?.distribution;
+  if (!distribution || !distribution.length) {
+    el.className = 'payout-banner pending';
+    el.textContent = pending > 0 ? 'Utdelning fastställs efter alla matcher' : 'Utdelning fastställs inom kort (Svenska Spel verifierar resultatet)';
+    el.style.display = '';
+    return;
+  }
+  const tier = distribution.find(t => t.correct === correct);
+  if (tier) {
+    el.className = 'payout-banner win';
+    el.textContent = `🏆 Nuvarande utdelning: ${fmtKr(tier.amount)} (${correct} rätt, ${tier.winners} vinnare)`;
+  } else {
+    el.className = 'payout-banner none';
+    el.textContent = `Ingen vinst denna omgång (${correct} rätt)`;
+  }
+  el.style.display = '';
+}
+
+function payoutTableHtml(correct) {
+  const distribution = drawResult[selectedProduct]?.distribution;
+  if (!distribution || !distribution.length) return '';
+  const rows = [...distribution].sort((a, b) => b.correct - a.correct).map(t => {
+    const mine = t.correct === correct;
+    return `<tr class="${mine ? 'your-tier' : ''}"><td>${t.correct} rätt</td><td>${fmtKr(t.amount)}</td><td>${(t.winners ?? '–').toLocaleString('sv-SE')}</td></tr>`;
+  }).join('');
+  return `
+    <div class="payout-table-title">Utdelning</div>
+    <div class="payout-table">
+      <table>
+        <thead><tr><th>Rätt</th><th>Utdelning</th><th>Vinnare</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
+}
+
+function fmtKr(amount) {
+  return amount == null ? '–' : Math.round(amount).toLocaleString('sv-SE') + ' kr';
 }
 
 function setManualResult(rowNum, sign) {

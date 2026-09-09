@@ -160,6 +160,57 @@ def fetch_draw(product='stryktipset'):
         print(f'Draw fetch error ({product}): {e}')
     return _draw_cache[product]
 
+_result_cache = {p: None for p in PRODUCTS}
+
+def fetch_result(product, draw_number):
+    """Once Svenska Spel fully finalizes a draw (all matches done + verified — this can lag
+    kickoff-to-kickoff by hours), a dedicated /result endpoint appears with the official 1/X/2
+    outcome per match (no score-guessing needed) plus the real payout distribution (winners +
+    kronor per row for 10/11/12/13 rätt). Confirmed against a real past draw (4969): 404s until
+    finalized, so a 404 here just means 'not settled yet', not an error."""
+    if product not in PRODUCTS or not draw_number:
+        return _result_cache[product]
+    import requests as req
+    try:
+        r = req.get(f'https://api.spela.svenskaspel.se/draw/1/{product}/draws/{draw_number}/result',
+                     headers={'User-Agent': 'Mozilla/5.0'}, timeout=15)
+        if r.status_code == 404:
+            return _result_cache[product]
+        r.raise_for_status()
+        result = (r.json() or {}).get('result') or {}
+
+        outcomes = {}
+        for ev in result.get('events', []):
+            match_id = ev.get('matchId')
+            outcome = ev.get('outcome')
+            if match_id and outcome:
+                outcomes[str(match_id)] = outcome
+
+        distribution = []
+        for tier in result.get('distribution', []):
+            win_div = tier.get('winDiv')
+            if win_div is None:
+                continue
+            distribution.append({
+                'correct': 13 - win_div,  # winDiv 0 == 13 rätt, 1 == 12 rätt, etc. (observed on draw 4969)
+                'winners': tier.get('winners'),
+                'amount': parse_odds(tier.get('amount')),
+            })
+        distribution.sort(key=lambda t: -t['correct'])
+
+        if not outcomes and not distribution:
+            return _result_cache[product]
+
+        _result_cache[product] = {
+            'draw_number': draw_number,
+            'outcomes': outcomes,
+            'distribution': distribution,
+        }
+        print(f"{product}: fetched final result for draw {draw_number} ({len(outcomes)} outcomes, {len(distribution)} payout tiers)")
+    except Exception as e:
+        print(f'Result fetch error ({product}, draw {draw_number}): {e}')
+    return _result_cache[product]
+
 LIVE_POLL_SECONDS = 20
 IDLE_POLL_SECONDS = 90
 
@@ -196,9 +247,13 @@ def background_poller():
         any_live = False
         for product in PRODUCTS:
             try:
-                fetch_draw(product)
-                if has_live_match(_draw_cache[product]):
+                draw = fetch_draw(product)
+                if has_live_match(draw):
                     any_live = True
+                draw_number = (draw or {}).get('draw_number')
+                cached_result = _result_cache[product]
+                if draw_number and (not cached_result or cached_result.get('draw_number') != draw_number):
+                    fetch_result(product, draw_number)
             except Exception as e:
                 print(f'Background poller error ({product}): {e}')
         time.sleep(LIVE_POLL_SECONDS if any_live else IDLE_POLL_SECONDS)
@@ -476,6 +531,15 @@ def change_password():
     save_data(data)
     return jsonify({'status': 'ok'})
 
+def _result_for(product, draw):
+    """Only hand back a cached result if it actually matches the current draw — otherwise a
+    finalized result from last week could get shown against this week's fresh coupon."""
+    result = _result_cache[product]
+    draw_number = (draw or {}).get('draw_number')
+    if result and draw_number and result.get('draw_number') == draw_number:
+        return result
+    return None
+
 @app.route('/api/draw')
 def get_draw():
     product = request.args.get('product', 'stryktipset')
@@ -483,7 +547,7 @@ def get_draw():
         product = 'stryktipset'
     draw = _draw_cache[product] or fetch_draw(product)
     last = _last_scraped[product]
-    return jsonify({'draw': draw, 'last_updated': last.isoformat() if last else None, 'has_live': has_live_match(draw)})
+    return jsonify({'draw': draw, 'last_updated': last.isoformat() if last else None, 'has_live': has_live_match(draw), 'result': _result_for(product, draw)})
 
 @app.route('/api/refresh-draw', methods=['POST'])
 def refresh_draw():
@@ -492,7 +556,9 @@ def refresh_draw():
         product = 'stryktipset'
     draw = fetch_draw(product)
     last = _last_scraped[product]
-    return jsonify({'draw': draw, 'last_updated': last.isoformat() if last else None, 'has_live': has_live_match(draw)})
+    if draw and draw.get('draw_number'):
+        fetch_result(product, draw['draw_number'])
+    return jsonify({'draw': draw, 'last_updated': last.isoformat() if last else None, 'has_live': has_live_match(draw), 'result': _result_for(product, draw)})
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5003))
