@@ -677,7 +677,15 @@ function deriveResultSign(ev) {
   const res = ev && ev.result;
   if (!res || !Array.isArray(res) || !res.length) return null;
   try {
-    const entry = res.find(r => r.sportEventResultType === 'Fulltime') || res[res.length - 1];
+    // Confirmed bug against a real live match: with no 'Fulltime' entry yet, the array can
+    // contain a stale 'Halftime' entry AFTER 'Current' (e.g. [Current, Halftime]) — falling
+    // back to the last array element picked that frozen half-time score instead of the live
+    // one, so the pill highlighting disagreed with the score shown next to it (currentScore()
+    // already correctly preferred 'Current'). 'Current' reflects the true score at any point,
+    // live or finished (verified against a real finished match too), so prefer it outright.
+    const entry = res.find(r => r.sportEventResultType === 'Current')
+      || res.find(r => r.sportEventResultType === 'Fulltime')
+      || res[res.length - 1];
     if (!entry) return null;
     const h = entry.home;
     const a = entry.away;
