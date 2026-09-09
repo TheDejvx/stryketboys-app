@@ -86,6 +86,24 @@ def parse_odds(val):
     except Exception:
         return None
 
+def extract_live_minute(m):
+    """Best-effort read of the current match clock. Svenska Spel's draws endpoint has never
+    been observed carrying a live match (all games are pre-kickoff until draw close), so the
+    exact field name is unverified — this tries every plausible key and falls back to None,
+    which the frontend just renders as a plain 'Pågår' badge with no minute. Revisit once we
+    can inspect the payload during an actual live window (Saturday afternoon)."""
+    for key in ('matchClock', 'clock', 'eventTime', 'liveTime', 'minute', 'currentMinute', 'gameTime'):
+        val = m.get(key)
+        if val:
+            return val
+    live = m.get('liveData') or m.get('live') or {}
+    if isinstance(live, dict):
+        for key in ('clock', 'minute', 'time'):
+            val = live.get(key)
+            if val:
+                return val
+    return None
+
 def fetch_draw(product='stryktipset'):
     """Pull the current draw (matches, odds, live status) for the given product
     ('stryktipset' or 'europatipset') from Svenska Spel's public draws API — no
@@ -121,6 +139,7 @@ def fetch_draw(product='stryktipset'):
                 'status': m.get('status'),
                 'sport_event_status': m.get('sportEventStatus'),
                 'result': m.get('result'),
+                'live_minute': extract_live_minute(m),
                 'odds_1': parse_odds(odds.get('one')),
                 'odds_x': parse_odds(odds.get('x')),
                 'odds_2': parse_odds(odds.get('two')),
@@ -141,15 +160,48 @@ def fetch_draw(product='stryktipset'):
         print(f'Draw fetch error ({product}): {e}')
     return _draw_cache[product]
 
+LIVE_POLL_SECONDS = 20
+IDLE_POLL_SECONDS = 90
+
+def has_live_match(draw):
+    """Best-effort: a match counts as 'live' if it has kicked off but neither its
+    sportEventStatus nor status string indicates it's finished. Used only to decide
+    polling speed, so false positives just mean we poll a bit more than strictly needed."""
+    if not draw:
+        return False
+    now = datetime.now(timezone.utc)
+    for ev in draw.get('events', []):
+        start = ev.get('match_start')
+        if not start:
+            continue
+        try:
+            start_dt = datetime.fromisoformat(start.replace('Z', '+00:00'))
+        except Exception:
+            continue
+        if start_dt > now:
+            continue
+        if _looks_finished(ev):
+            continue
+        return True
+    return False
+
+def _looks_finished(ev):
+    s = (ev.get('sport_event_status') or '').lower()
+    st = (ev.get('status') or '').lower()
+    return any(k in s for k in ('end', 'finish', 'final')) or any(k in st for k in ('avslutad', 'slut'))
+
 def background_poller():
     time.sleep(5)
     while True:
+        any_live = False
         for product in PRODUCTS:
             try:
                 fetch_draw(product)
+                if has_live_match(_draw_cache[product]):
+                    any_live = True
             except Exception as e:
                 print(f'Background poller error ({product}): {e}')
-        time.sleep(90)
+        time.sleep(LIVE_POLL_SECONDS if any_live else IDLE_POLL_SECONDS)
 
 threading.Thread(target=background_poller, daemon=True).start()
 
@@ -431,7 +483,7 @@ def get_draw():
         product = 'stryktipset'
     draw = _draw_cache[product] or fetch_draw(product)
     last = _last_scraped[product]
-    return jsonify({'draw': draw, 'last_updated': last.isoformat() if last else None})
+    return jsonify({'draw': draw, 'last_updated': last.isoformat() if last else None, 'has_live': has_live_match(draw)})
 
 @app.route('/api/refresh-draw', methods=['POST'])
 def refresh_draw():
@@ -440,7 +492,7 @@ def refresh_draw():
         product = 'stryktipset'
     draw = fetch_draw(product)
     last = _last_scraped[product]
-    return jsonify({'draw': draw, 'last_updated': last.isoformat() if last else None})
+    return jsonify({'draw': draw, 'last_updated': last.isoformat() if last else None, 'has_live': has_live_match(draw)})
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5003))

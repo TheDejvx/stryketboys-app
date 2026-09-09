@@ -311,6 +311,7 @@ body {
           <h2 id="kupong-title">🎟️ Denna veckans kupong</h2>
           <div style="display:flex;align-items:center;gap:8px">
             <span class="matches-meta" id="draw-updated"></span>
+            <button class="btn-ghost" id="refresh-draw-btn" onclick="manualRefresh()" title="Uppdatera nu">🔄</button>
             <button class="btn-delete" id="delete-week-btn" style="display:none" onclick="deleteCurrentWeek()" title="Ta bort kupong">🗑 Ta bort</button>
           </div>
         </div>
@@ -617,6 +618,16 @@ async function refreshDraw(product) {
   } catch (e) { console.error(e); }
   render();
 }
+async function manualRefresh() {
+  const btn = document.getElementById('refresh-draw-btn');
+  if (btn) { btn.disabled = true; btn.textContent = '⏳'; }
+  await refreshDraw(selectedProduct);
+  if (btn) { btn.disabled = false; btn.textContent = '🔄'; }
+}
+// Poll the currently viewed product's draw so live status/scores update without a manual
+// reload — the server already caches upstream data and self-throttles its own poll speed
+// based on whether a match is live, so this client poll is just cheap re-reads of that cache.
+setInterval(() => { loadDraw(selectedProduct); }, 20000);
 // ── HELPERS ──
 function esc(s) { return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 function findEvent(matchId) { return (drawData[selectedProduct]?.events || []).find(e => e.match_id === matchId) || null; }
@@ -755,9 +766,17 @@ function renderKupong() {
       const auto = deriveResultSign(ev);
       if (auto) { row.settled_result = auto; changed = true; }
     }
+    // While a match is still in progress, derive a *provisional* sign from the live score so
+    // the running tally reflects the current standing — but never write it to row.settled_result,
+    // since it can still flip before full time.
+    const liveSign = (live && !finished) ? deriveResultSign(ev) : null;
+    const effectiveResult = row.settled_result || liveSign;
 
     let badge = `<span class="match-badge badge-pending">Ej startad</span>`;
-    if (live) badge = `<span class="match-badge badge-live">🔴 Pågår</span>`;
+    if (live) {
+      const minuteText = ev && ev.live_minute ? ` ${esc(ev.live_minute)}` : '';
+      badge = `<span class="match-badge badge-live">🔴 Pågår${minuteText}</span>`;
+    }
     if (finished) {
       if (row.settled_result) {
         const hit = (row.picks || []).includes(row.settled_result);
@@ -767,6 +786,9 @@ function renderKupong() {
         badge = `<span class="match-badge badge-pending">Slutspelad – ange resultat</span>`;
         pending++;
       }
+    } else if (liveSign) {
+      const hit = (row.picks || []).includes(liveSign);
+      if (hit) correct++; else wrong++;
     } else {
       pending++;
     }
@@ -774,8 +796,8 @@ function renderKupong() {
     const pillsHtml = ['1', 'X', '2'].map(sign => {
       const selected = (row.picks || []).includes(sign);
       let cls = 'pick-pill';
-      if (finished && row.settled_result) {
-        if (selected && sign === row.settled_result) cls += ' correct';
+      if (effectiveResult) {
+        if (selected && sign === effectiveResult) cls += ' correct';
         else if (selected) cls += ' incorrect';
       } else if (selected) cls += ' selected';
       return `<span class="${cls}">${sign}</span>`;
