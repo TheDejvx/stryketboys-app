@@ -97,23 +97,14 @@ def parse_odds(val):
     except Exception:
         return None
 
-def extract_live_minute(m):
-    """Best-effort read of the current match clock. Svenska Spel's draws endpoint has never
-    been observed carrying a live match (all games are pre-kickoff until draw close), so the
-    exact field name is unverified — this tries every plausible key and falls back to None,
-    which the frontend just renders as a plain 'Pågår' badge with no minute. Revisit once we
-    can inspect the payload during an actual live window (Saturday afternoon)."""
-    for key in ('matchClock', 'clock', 'eventTime', 'liveTime', 'minute', 'currentMinute', 'gameTime'):
-        val = m.get(key)
-        if val:
-            return val
-    live = m.get('liveData') or m.get('live') or {}
-    if isinstance(live, dict):
-        for key in ('clock', 'minute', 'time'):
-            val = live.get(key)
-            if val:
-                return val
-    return None
+# Confirmed against a real live match (Ljungskile-Norrby, SecondHalf): Svenska Spel's draws API
+# carries no match-clock/minute field at all — every key extract_live_minute() used to guess at
+# (matchClock, clock, minute, etc., plus a nested liveData/live dict) is genuinely absent. Only
+# statusId/sportEventStatus (coarse period: NotStarted/FirstHalf/Halftime/SecondHalf/Ended) and
+# statusTime (when that status last changed) exist. The frontend now estimates a "80'"-style
+# minute client-side from match_start (first-half kickoff) / status_time (second-half kickoff,
+# i.e. when sportEventStatus last flipped to SecondHalf) instead — see estimateMinute() in
+# templates/index.html. status_time is exposed for that; extract_live_minute() is gone.
 
 def _last_saved_draw_number(product):
     """Cold-start fallback for fetch_draw()'s closed/live-draw case: this process's in-memory
@@ -181,8 +172,8 @@ def fetch_draw(product='stryktipset'):
                 'match_start': m.get('matchStart'),
                 'status': m.get('status'),
                 'sport_event_status': m.get('sportEventStatus'),
+                'status_time': m.get('statusTime'),
                 'result': m.get('result'),
-                'live_minute': extract_live_minute(m),
                 'odds_1': parse_odds(odds.get('one')),
                 'odds_x': parse_odds(odds.get('x')),
                 'odds_2': parse_odds(odds.get('two')),

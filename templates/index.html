@@ -676,7 +676,17 @@ function isLive(ev) {
   const s = (ev.sport_event_status || '').toLowerCase();
   const st = (ev.status || '').toLowerCase();
   if (s === 'notstarted' || st.includes('inte startat')) return false;
-  return /live|inprogress|\bstarted\b|half/.test(s) || /pågår|paus/.test(st);
+  return /live|inprogress|\bstarted\b|half|interrupted|suspended|abandoned/.test(s) || /pågår|paus|avbruten/.test(st);
+}
+// Confirmed against a real match (Ljungskile-Norrby): sportEventStatus can be "Interrupted"
+// ("Avbruten") — the game has started and isn't finished, so isLive() above now treats it as
+// live, but the match clock has actually stopped, so estimateMinute()'s elapsed-time guess would
+// just keep counting up wrongly. Shown as a plain "Avbruten" badge instead of a fabricated minute.
+function isInterrupted(ev) {
+  if (!ev) return false;
+  const s = (ev.sport_event_status || '').toLowerCase();
+  const st = (ev.status || '').toLowerCase();
+  return /interrupted|suspended|abandoned/.test(s) || /avbruten/.test(st);
 }
 // Prefer the official settled outcome (drawResult[product].outcomes[matchId], see buildWeekRows)
 // once Svenska Spel finalizes the draw — exact, no guessing. This score-based derivation is only
@@ -714,6 +724,26 @@ function currentScore(ev) {
   const entry = res.find(r => r.sportEventResultType === 'Current') || res[0];
   if (!entry || entry.home == null || entry.away == null) return null;
   return `${entry.home}-${entry.away}`;
+}
+// Confirmed against a real live match: Svenska Spel's API has no match-clock field at all — only
+// the coarse period (sport_event_status: FirstHalf/Halftime/SecondHalf) and status_time (when
+// that period last started). So this is an ESTIMATE, not official data: elapsed = now minus the
+// current period's start (match_start for the first half, status_time for the second), offset by
+// 45 for the second half, capped at 45/90 (stoppage time isn't knowable from this data).
+function estimateMinute(ev) {
+  if (!ev) return null;
+  const status = (ev.sport_event_status || '').toLowerCase();
+  if (status === 'halftime') return 'HT';
+  if (status !== 'firsthalf' && status !== 'secondhalf') return null;
+  const periodStart = status === 'firsthalf'
+    ? (ev.match_start ? new Date(ev.match_start) : null)
+    : (ev.status_time ? new Date(ev.status_time) : null);
+  if (!periodStart || isNaN(periodStart.getTime())) return null;
+  const baseMinute = status === 'firsthalf' ? 0 : 45;
+  const cap = status === 'firsthalf' ? 45 : 90;
+  const elapsed = Math.floor((Date.now() - periodStart.getTime()) / 60000);
+  const minute = Math.min(cap, baseMinute + Math.max(0, elapsed));
+  return `${minute}'`;
 }
 // Explicit rotation order (usernames) + a pointer, persisted in state — not derived from
 // state.weeks.length, which was fragile (a deleted test coupon or an off-cycle upload silently
@@ -850,10 +880,15 @@ function buildWeekRows(week) {
     let badge = `<span class="match-badge badge-pending">Ej startad</span>`;
     let scoreHtml = '';
     if (live) {
-      const minuteText = ev && ev.live_minute ? ` ${esc(ev.live_minute)}` : '';
       const score = currentScore(ev);
       if (score) scoreHtml = `<span class="live-score">${esc(score)}</span>`;
-      badge = `<span class="match-badge badge-live">Pågår${minuteText}</span>`;
+      if (isInterrupted(ev)) {
+        badge = `<span class="match-badge badge-live">⏸ Avbruten</span>`;
+      } else {
+        const minute = estimateMinute(ev);
+        const minuteText = minute ? `${esc(minute)} ` : '';
+        badge = `<span class="match-badge badge-live">${minuteText}Pågår</span>`;
+      }
     }
     if (finished) {
       const score = currentScore(ev);
