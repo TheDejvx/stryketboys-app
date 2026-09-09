@@ -822,7 +822,8 @@ function renderKupong() {
     </div>`;
   }).join('');
 
-  document.getElementById('kupong-title').textContent = `🎟️ ${PRODUCT_LABELS[selectedProduct]} v${draw.draw_number ?? ''} – ${esc(week.uploaded_by || '')}`;
+  const total = (week.rows || []).length;
+  document.getElementById('kupong-title').textContent = `🎟️ ${PRODUCT_LABELS[selectedProduct]} v${draw.draw_number ?? ''} – ${esc(week.uploaded_by || '')} · ${correct}/${total} rätt`;
   document.getElementById('delete-week-btn').style.display = '';
   tallyBar.style.display = '';
   document.getElementById('tally-correct').textContent = correct;
