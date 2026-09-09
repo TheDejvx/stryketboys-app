@@ -2,5 +2,5 @@ flask
 pymongo[srv]
 waitress
 requests
-anthropic
+google-genai
 Pillow

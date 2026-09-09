@@ -146,19 +146,23 @@ def background_poller():
 threading.Thread(target=background_poller, daemon=True).start()
 
 
-# ── COUPON DECODE (Claude vision) ──
+# ── COUPON DECODE (Gemini vision) ──
+# Switched from Claude to Gemini after manual side-by-side testing showed Gemini reading the
+# pill grid correctly on the first try — the exact thing 10 rounds of Claude prompt/pipeline
+# engineering couldn't reliably fix (see CLAUDE.md decode-flow history v1-v10). Different vision
+# encoders clearly have different strengths on this specific fine-grained-grid task.
 
-_anthropic_client = None
+_gemini_client = None
 
-def get_anthropic():
-    global _anthropic_client
-    if _anthropic_client is None:
-        key = os.environ.get('ANTHROPIC_API_KEY')
+def get_gemini():
+    global _gemini_client
+    if _gemini_client is None:
+        key = os.environ.get('GEMINI_API_KEY')
         if not key:
             return None
-        from anthropic import Anthropic
-        _anthropic_client = Anthropic(api_key=key)
-    return _anthropic_client
+        from google import genai
+        _gemini_client = genai.Client(api_key=key)
+    return _gemini_client
 
 DESCRIBE_PROMPT = (
     "This is a screenshot of a Svenska Spel Stryktipset betting coupon (Swedish football pool betting). It "
@@ -226,9 +230,9 @@ def fuzzy_match_event(home, away, events):
 
 @app.route('/api/coupon/decode', methods=['POST'])
 def decode_coupon():
-    client = get_anthropic()
+    client = get_gemini()
     if client is None:
-        return jsonify({'status': 'error', 'message': 'ANTHROPIC_API_KEY not configured on the server'}), 500
+        return jsonify({'status': 'error', 'message': 'GEMINI_API_KEY not configured on the server'}), 500
     if 'image' not in request.files:
         return jsonify({'status': 'error', 'message': 'No image uploaded'}), 400
 
@@ -242,24 +246,21 @@ def decode_coupon():
     except Exception as e:
         return jsonify({'status': 'error', 'message': f'Kunde inte läsa bildformatet: {e}'}), 400
 
-    b64 = base64.b64encode(img_bytes).decode('utf-8')
-    image_block = {'type': 'image', 'source': {'type': 'base64', 'media_type': media_type, 'data': b64}}
-
     try:
         # Single call: the model reasons in plain text first, then ends with a strict
         # machine-readable summary block that we parse with a regex — no second LLM call
         # "transcribing" its own analysis. This is the AI's best-effort first draft; the
         # frontend always shows it as an editable preview (with the original photo visible
         # alongside it) rather than expecting a perfect unassisted read.
-        resp = client.messages.create(
-            model='claude-sonnet-5',
-            max_tokens=4000,
-            messages=[{
-                'role': 'user',
-                'content': [image_block, {'type': 'text', 'text': DESCRIBE_PROMPT}],
-            }],
+        from google.genai import types as genai_types
+        resp = client.models.generate_content(
+            model='gemini-2.5-pro',
+            contents=[
+                DESCRIBE_PROMPT,
+                genai_types.Part.from_bytes(data=img_bytes, mime_type=media_type),
+            ],
         )
-        analysis_text = ''.join(b.text for b in resp.content if b.type == 'text')
+        analysis_text = resp.text or ''
         if not analysis_text.strip():
             return jsonify({'status': 'error', 'message': 'Model returned no analysis'}), 500
         print('--- coupon decode raw analysis ---')
