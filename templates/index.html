@@ -86,13 +86,6 @@ body {
 .tab-btn.active { background: var(--white); color: var(--primary-dark); }
 .tab-content { display: none; }
 
-.product-tabs { display: flex; gap: 6px; margin-bottom: 12px; }
-.product-tab {
-  flex: 1; background: var(--white); border: 1.5px solid var(--border); color: var(--muted);
-  padding: 8px 8px; border-radius: 9px; font-size: 12.5px; font-weight: 700; cursor: pointer;
-  transition: all .15s; white-space: nowrap; box-shadow: 0 1px 4px rgba(0,0,0,.05);
-}
-.product-tab.active { background: var(--primary); border-color: var(--primary); color: var(--white); }
 .tab-content.active { display: block; }
 
 /* ── CARDS ── */
@@ -297,8 +290,6 @@ body {
 
     <!-- KUPONG -->
     <div class="tab-content active" id="tab-kupong">
-
-      <div class="product-tabs" id="product-tabs"></div>
 
       <div class="summary-bar" id="tally-bar" style="display:none">
         <div class="summary-item">
@@ -626,12 +617,6 @@ async function refreshDraw(product) {
   } catch (e) { console.error(e); }
   render();
 }
-function switchProduct(product) {
-  if (!PRODUCTS.includes(product) || product === selectedProduct) return;
-  selectedProduct = product;
-  render();
-}
-
 // ── HELPERS ──
 function esc(s) { return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 function findEvent(matchId) { return (drawData[selectedProduct]?.events || []).find(e => e.match_id === matchId) || null; }
@@ -697,20 +682,11 @@ function switchTab(name) {
 // ── RENDER ──
 function render() {
   updateAuthUI();
-  renderProductTabs();
   renderDrawMeta();
   renderKupong();
   renderHistory();
   renderStats();
   renderPlayers();
-}
-
-function renderProductTabs() {
-  const el = document.getElementById('product-tabs');
-  if (!el) return;
-  el.innerHTML = PRODUCTS.map(p =>
-    `<button class="product-tab${p === selectedProduct ? ' active' : ''}" onclick="switchProduct('${p}')">${PRODUCT_LABELS[p]}</button>`
-  ).join('');
 }
 
 function renderDrawMeta() {
