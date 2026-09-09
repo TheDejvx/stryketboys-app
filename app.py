@@ -70,9 +70,13 @@ def public_data(data):
 
 
 # ── SVENSKA SPEL DRAW DATA ──
+# Both Stryktipset and Europatipset live on the same API family/shape — just a different
+# product slug in the URL — so one fetch_draw() serves both, cached separately per product.
 
-_draw_cache = None
-_last_scraped = None
+PRODUCTS = ('stryktipset', 'europatipset')
+
+_draw_cache = {p: None for p in PRODUCTS}
+_last_scraped = {p: None for p in PRODUCTS}
 
 def parse_odds(val):
     if not val:
@@ -82,20 +86,22 @@ def parse_odds(val):
     except Exception:
         return None
 
-def fetch_draw():
-    """Pull the current Stryktipset draw (matches, odds, live status) from
-    Svenska Spel's public draws API — no auth, no scraping needed."""
-    global _draw_cache, _last_scraped
+def fetch_draw(product='stryktipset'):
+    """Pull the current draw (matches, odds, live status) for the given product
+    ('stryktipset' or 'europatipset') from Svenska Spel's public draws API — no
+    auth, no scraping needed."""
+    if product not in PRODUCTS:
+        product = 'stryktipset'
     import requests as req
     try:
-        r = req.get('https://api.spela.svenskaspel.se/draw/1/stryktipset/draws',
+        r = req.get(f'https://api.spela.svenskaspel.se/draw/1/{product}/draws',
                      params={'numberOfDraws': 1},
                      headers={'User-Agent': 'Mozilla/5.0'}, timeout=15)
         r.raise_for_status()
         payload = r.json()
         draws = payload.get('draws') or []
         if not draws:
-            return _draw_cache
+            return _draw_cache[product]
         d = draws[0]
 
         events = []
@@ -121,26 +127,28 @@ def fetch_draw():
             })
         events.sort(key=lambda x: x['row_num'] or 0)
 
-        _draw_cache = {
+        _draw_cache[product] = {
+            'product': product,
             'draw_number': d.get('drawNumber'),
             'draw_state': d.get('drawState'),
             'reg_close_time': d.get('regCloseTime'),
             'current_net_sale': d.get('currentNetSale'),
             'events': events,
         }
-        _last_scraped = datetime.now(timezone.utc)
-        print(f"Stryktipset: fetched draw {_draw_cache['draw_number']} with {len(events)} matches")
+        _last_scraped[product] = datetime.now(timezone.utc)
+        print(f"{product}: fetched draw {_draw_cache[product]['draw_number']} with {len(events)} matches")
     except Exception as e:
-        print(f'Draw fetch error: {e}')
-    return _draw_cache
+        print(f'Draw fetch error ({product}): {e}')
+    return _draw_cache[product]
 
 def background_poller():
     time.sleep(5)
     while True:
-        try:
-            fetch_draw()
-        except Exception as e:
-            print(f'Background poller error: {e}')
+        for product in PRODUCTS:
+            try:
+                fetch_draw(product)
+            except Exception as e:
+                print(f'Background poller error ({product}): {e}')
         time.sleep(90)
 
 threading.Thread(target=background_poller, daemon=True).start()
@@ -164,30 +172,34 @@ def get_gemini():
         _gemini_client = genai.Client(api_key=key)
     return _gemini_client
 
-DESCRIBE_PROMPT = (
-    "This is a screenshot of a Svenska Spel Stryktipset betting coupon (Swedish football pool betting). It "
-    "has a numbered list of matches (usually 13), each with three small pill-shaped buttons in a fixed "
-    "left-to-right order: '1', 'X', '2'. A pill is SELECTED if its background is a solid dark navy blue with "
-    "white text, and NOT selected if its background is white/very light with a thin gray border and dark "
-    "text.\n\n"
-    "Process the rows ONE AT A TIME, in strict order from the first row to the last. Do NOT skip ahead and do "
-    "NOT batch multiple rows together — for EVERY row, immediately after analyzing it, output its result line "
-    "before moving to the next row.\n\n"
-    "Before row 1, output one line: SYSTEM_TYPE: <the label near the top of the coupon, e.g. 'M-system', "
-    "'B-system', 'Helsystem', or 'Enkelrad' if none is visible>\n\n"
-    "Then for every single row, output exactly this two-part block, in order:\n"
-    "Analysis: name the two teams, then describe what you see for the '1', 'X', '2' pills individually — do "
-    "not assume a pattern from previous rows, and do not stop looking after finding the first selected pill. "
-    "It is common and expected for two pills to be selected on the same row at once (e.g. X and 2 both "
-    "selected, 1 empty) — this is a normal 'garderad rad' (system bet row), not an error.\n"
-    "ROW <n> | <home team> - <away team> | <kickoff text> | 1=<0 or 1> X=<0 or 1> 2=<0 or 1>\n\n"
-    "Use 1 for selected, 0 for not selected in the ROW line. Example of one complete row's block:\n"
-    "Analysis: The 1 pill is white with a gray border — not selected. The X pill is solid dark navy with "
-    "white text — selected. The 2 pill is also solid dark navy with white text — selected.\n"
-    "ROW 7 | Cardiff - Sheffield U | Idag 16:00 | 1=0 X=1 2=1\n\n"
-    "Begin now with SYSTEM_TYPE, then Row 1's analysis and ROW line, then Row 2's, continuing strictly in "
-    "order through every row visible on the coupon. Do not skip any row."
-)
+PRODUCT_LABELS = {'stryktipset': 'Stryktipset', 'europatipset': 'Europatipset'}
+
+def build_describe_prompt(product, expected_rows):
+    label = PRODUCT_LABELS.get(product, 'Stryktipset')
+    return (
+        f"This is a screenshot of a Svenska Spel {label} betting coupon (Swedish football pool betting). It "
+        f"has a numbered list of matches (usually {expected_rows}), each with three small pill-shaped buttons in "
+        "a fixed left-to-right order: '1', 'X', '2'. A pill is SELECTED if its background is a solid dark navy "
+        "blue with white text, and NOT selected if its background is white/very light with a thin gray border "
+        "and dark text.\n\n"
+        "Process the rows ONE AT A TIME, in strict order from the first row to the last. Do NOT skip ahead and do "
+        "NOT batch multiple rows together — for EVERY row, immediately after analyzing it, output its result line "
+        "before moving to the next row.\n\n"
+        "Before row 1, output one line: SYSTEM_TYPE: <the label near the top of the coupon, e.g. 'M-system', "
+        "'B-system', 'Helsystem', or 'Enkelrad' if none is visible>\n\n"
+        "Then for every single row, output exactly this two-part block, in order:\n"
+        "Analysis: name the two teams, then describe what you see for the '1', 'X', '2' pills individually — do "
+        "not assume a pattern from previous rows, and do not stop looking after finding the first selected pill. "
+        "It is common and expected for two pills to be selected on the same row at once (e.g. X and 2 both "
+        "selected, 1 empty) — this is a normal 'garderad rad' (system bet row), not an error.\n"
+        "ROW <n> | <home team> - <away team> | <kickoff text> | 1=<0 or 1> X=<0 or 1> 2=<0 or 1>\n\n"
+        "Use 1 for selected, 0 for not selected in the ROW line. Example of one complete row's block:\n"
+        "Analysis: The 1 pill is white with a gray border — not selected. The X pill is solid dark navy with "
+        "white text — selected. The 2 pill is also solid dark navy with white text — selected.\n"
+        "ROW 7 | Cardiff - Sheffield U | Idag 16:00 | 1=0 X=1 2=1\n\n"
+        f"Begin now with SYSTEM_TYPE, then Row 1's analysis and ROW line, then Row 2's, continuing strictly in "
+        f"order through every row visible on the coupon (expect {expected_rows} rows total). Do not skip any row."
+    )
 
 ROW_LINE_RE = re.compile(
     r'ROW\s+(\d+)\s*\|\s*(.+?)\s*-\s*(.+?)\s*\|\s*(.*?)\s*\|\s*1=([01])\s+X=([01])\s+2=([01])',
@@ -236,6 +248,10 @@ def decode_coupon():
     if 'image' not in request.files:
         return jsonify({'status': 'error', 'message': 'No image uploaded'}), 400
 
+    product = request.form.get('product', 'stryktipset')
+    if product not in PRODUCTS:
+        product = 'stryktipset'
+
     img = request.files['image']
     img_bytes = img.read()
     media_type = img.mimetype or 'image/jpeg'
@@ -245,6 +261,10 @@ def decode_coupon():
         pil_img.load()
     except Exception as e:
         return jsonify({'status': 'error', 'message': f'Kunde inte läsa bildformatet: {e}'}), 400
+
+    draw = _draw_cache[product] or fetch_draw(product)
+    events = (draw or {}).get('events', [])
+    expected_rows = len(events) if events else 13
 
     try:
         # Single call: the model reasons in plain text first, then ends with a strict
@@ -256,7 +276,7 @@ def decode_coupon():
         resp = client.models.generate_content(
             model='gemini-3.5-flash',
             contents=[
-                DESCRIBE_PROMPT,
+                build_describe_prompt(product, expected_rows),
                 genai_types.Part.from_bytes(data=img_bytes, mime_type=media_type),
             ],
         )
@@ -269,18 +289,15 @@ def decode_coupon():
         system_type, rows = parse_decode_analysis(analysis_text)
         if not rows:
             return jsonify({'status': 'error', 'message': 'Could not parse the model’s analysis — try again'}), 500
-        if len(rows) != 13:
-            missing = sorted(set(range(1, 14)) - {r['row_num'] for r in rows})
-            print(f'WARNING: parsed {len(rows)} rows, expected 13 — missing row(s): {missing}')
+        if len(rows) != expected_rows:
+            missing = sorted(set(range(1, expected_rows + 1)) - {r['row_num'] for r in rows})
+            print(f'WARNING: parsed {len(rows)} rows, expected {expected_rows} — missing row(s): {missing}')
             return jsonify({
                 'status': 'error',
-                'message': f'Läste bara {len(rows)} av 13 rader (saknar rad {", ".join(map(str, missing))}) — försök igen',
+                'message': f'Läste bara {len(rows)} av {expected_rows} rader (saknar rad {", ".join(map(str, missing))}) — försök igen',
             }), 500
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
-
-    draw = _draw_cache or fetch_draw()
-    events = (draw or {}).get('events', [])
 
     for row in rows:
         match, score = fuzzy_match_event(row.get('home', ''), row.get('away', ''), events)
@@ -298,6 +315,7 @@ def decode_coupon():
         'system_type': system_type,
         'rows': rows,
         'draw_number': (draw or {}).get('draw_number'),
+        'product': product,
     })
 
 @app.route('/api/coupon/save', methods=['POST'])
@@ -306,9 +324,13 @@ def save_coupon():
     data = load_data()
     weeks = data.setdefault('weeks', [])
 
-    week_id = payload.get('id') or f"week-{payload.get('draw_number', 'x')}-{int(time.time())}"
+    product = payload.get('product', 'stryktipset')
+    if product not in PRODUCTS:
+        product = 'stryktipset'
+    week_id = payload.get('id') or f"week-{product}-{payload.get('draw_number', 'x')}-{int(time.time())}"
     week = {
         'id': week_id,
+        'product': product,
         'draw_number': payload.get('draw_number'),
         'uploaded_by': payload.get('uploaded_by'),
         'system_type': payload.get('system_type', 'Enkelrad'),
@@ -385,13 +407,21 @@ def change_password():
 
 @app.route('/api/draw')
 def get_draw():
-    draw = _draw_cache or fetch_draw()
-    return jsonify({'draw': draw, 'last_updated': _last_scraped.isoformat() if _last_scraped else None})
+    product = request.args.get('product', 'stryktipset')
+    if product not in PRODUCTS:
+        product = 'stryktipset'
+    draw = _draw_cache[product] or fetch_draw(product)
+    last = _last_scraped[product]
+    return jsonify({'draw': draw, 'last_updated': last.isoformat() if last else None})
 
 @app.route('/api/refresh-draw', methods=['POST'])
 def refresh_draw():
-    draw = fetch_draw()
-    return jsonify({'draw': draw, 'last_updated': _last_scraped.isoformat() if _last_scraped else None})
+    product = request.args.get('product', 'stryktipset')
+    if product not in PRODUCTS:
+        product = 'stryktipset'
+    draw = fetch_draw(product)
+    last = _last_scraped[product]
+    return jsonify({'draw': draw, 'last_updated': last.isoformat() if last else None})
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5003))

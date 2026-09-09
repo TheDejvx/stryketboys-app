@@ -1,7 +1,7 @@
 # StryketBoys – Stryktipset coupon tracker
 
 ## Project
-Flask + vanilla JS app for tracking the group's weekly Stryktipset coupon. A different "boy" uploads a screenshot of the coupon each week; the app decodes it into structured picks, tracks live results, and installs to the homescreen on iOS/Android.
+Flask + vanilla JS app for tracking the group's weekly Stryktipset **and Europatipset** coupons. A different "boy" uploads a screenshot of the coupon each week; the app decodes it into structured picks, tracks live results, and installs to the homescreen on iOS/Android.
 - **Local:** `C:\Users\David\Desktop\Stryktipset\stryketboys-app\`
 - **Run locally:** `python app.py` → http://localhost:5003
 - **Gotcha (Windows/Git Bash dev env):** backgrounded `python app.py` runs pile up as orphaned processes still bound to port 5003 across many test iterations in one session — `ps`/`pkill` inside Git Bash show MSYS-internal PIDs that do **not** match the real Windows PIDs, so `pkill -f "python app.py"` silently fails to kill them and new requests intermittently hit stale zombie processes (wrong code, wrong/missing env vars — this cost real time chasing a phantom "env var not working" bug that was actually a 10-zombie-process pileup). To actually clean up: use PowerShell — `Get-Process python | Stop-Process -Force` — and verify with `Get-NetTCPConnection -LocalPort 5003`, not Bash's `ps`/`netstat`.
@@ -10,7 +10,7 @@ Flask + vanilla JS app for tracking the group's weekly Stryktipset coupon. A dif
 - Backend: Python/Flask, served with Waitress on Railway
 - Frontend: Single-page HTML/JS (`templates/index.html`), no build step
 - Data: MongoDB Atlas (`stryk_app` database, `stryk_state` collection), fallback to `stryk_data.json`
-- Live draw data: `https://api.spela.svenskaspel.se/draw/1/stryktipset/draws` (public, no auth) — no scraping needed
+- Live draw data: `https://api.spela.svenskaspel.se/draw/1/{product}/draws` (public, no auth) — same API family/shape for both `stryktipset` and `europatipset`, just a different URL segment — no scraping needed
 - Coupon decode: Gemini API (`google-genai`, `gemini-3.5-flash`), plain-text response parsed by regex (see decode-flow history below)
 - Deploy: Dockerfile + `railway.json`, no Playwright/browser deps needed
 
@@ -20,7 +20,8 @@ Flask + vanilla JS app for tracking the group's weekly Stryktipset coupon. A dif
   "boys": ["Name1", "Name2", ...],
   "weeks": [
     {
-      "id": "week-4970-...",
+      "id": "week-stryktipset-4970-...",
+      "product": "stryktipset",
       "draw_number": 4970,
       "uploaded_by": "Name1",
       "system_type": "M-system",
@@ -41,6 +42,12 @@ Flask + vanilla JS app for tracking the group's weekly Stryktipset coupon. A dif
 - `picks` is always an array — length 1 for straight bets, 2-3 for garderade/system rows (M-system, B-system, etc). A row counts as correct if `settled_result` is present in `picks`.
 - `settled_result` is filled in once a match finishes — either auto-derived client-side from the live draw API's `match.result` field (schema unverified — see caveat below), or manually tapped in by whoever's checking (finished rows always show a manual 1/X/2 override picker as a safety net).
 - `users` drives both login accounts and the "vem laddar upp" rotation hint (`nextUploader()` in the frontend). Each user: `{username, display_name, password_hash, must_change_password}`.
+- `product` (`"stryktipset"` or `"europatipset"`) is required on every week — weeks are matched to the live draw by `product` **and** `draw_number` together (`currentWeek()`), since both products can have an open draw simultaneously. Rotation (`nextUploader()`) is global across both products (just counts total weeks uploaded so far), not tracked separately per product.
+
+## Products (Stryktipset / Europatipset)
+Added Europatipset as a second product alongside the original Stryktipset-only build — same Svenska Spel API family, same 13-row coupon shape, so almost everything just needed to become product-parameterized rather than rebuilt:
+- Backend: `PRODUCTS = ('stryktipset', 'europatipset')`, `_draw_cache`/`_last_scraped` are dicts keyed by product, `fetch_draw(product)` takes the product as an argument, and `background_poller()` polls both every cycle. `/api/draw` and `/api/refresh-draw` take a `?product=` query param (defaults to `stryktipset` for back-compat). `/api/coupon/decode` takes `product` as a multipart form field, uses it to pick which cached draw to fuzzy-match against, and — since row count isn't hardcoded to 13 anywhere anymore — derives `expected_rows` from that product's actual live draw event count (`build_describe_prompt(product, expected_rows)`), falling back to 13 only if the draw isn't cached yet.
+- Frontend: `PRODUCTS`/`PRODUCT_LABELS` + `selectedProduct` (default `'stryktipset'`) drive a small tab toggle (`renderProductTabs()`) at the top of the Kupong tab. `drawData`/`drawUpdated` are objects keyed by product, loaded for both on `init()` (`Promise.all(PRODUCTS.map(loadDraw))`). `currentWeek()`, `findEvent()`, upload, and decode-preview save all read/write through `drawData[selectedProduct]` and tag the saved week with `product: selectedProduct`. Historik shows each week's product as a label since both interleave in one list.
 
 ## Known caveat: live result schema unverified
 `fetch_draw()` in `app.py` exposes each event's raw `result` field from Svenska Spel's API as-is; `deriveResultSign()` in the frontend guesses common score-object shapes (`homeScore`/`awayScore` etc.) to compute the 1/X/2 outcome once a match is finished. This was never confirmed against a real finished/live match (built before a live window). If auto-derivation comes back wrong or empty during a real Saturday, the manual override pills next to any finished-but-unsettled row are the correct fix path — check the actual `result` shape via `/api/draw` during a live match and tighten `deriveResultSign()` accordingly.
@@ -70,9 +77,9 @@ This went through several iterations to fix garderade (multi-sign, e.g. X2) rows
 
 ## Endpoints
 - `GET /api/data` / `POST /api/save` — load/save the whole state blob (Mongo w/ JSON fallback). `GET` strips `password_hash` via `public_data()`; `POST` re-merges each user's existing hash by username if the client didn't send one, so a stale client blob can never wipe a password.
-- `GET /api/draw` / `POST /api/refresh-draw` — cached current Stryktipset draw (matches, odds, live status), background-polled every 90s
-- `POST /api/coupon/decode` — image → structured preview (not persisted)
-- `POST /api/coupon/save` — persist a confirmed week
+- `GET /api/draw` / `POST /api/refresh-draw` — `?product=stryktipset|europatipset` (defaults to `stryktipset`) — cached current draw for that product (matches, odds, live status), background-polled every 90s for both products
+- `POST /api/coupon/decode` — multipart `image` + `product` fields → structured preview (not persisted)
+- `POST /api/coupon/save` — persist a confirmed week, `product` included in the JSON payload
 - `POST /api/login` — `{username, password}` → `{status, username, display_name, must_change_password}`. Username match is case-insensitive.
 - `POST /api/change-password` — `{username, current_password, new_password}`, requires the current password to verify, clears `must_change_password`.
 

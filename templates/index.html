@@ -85,6 +85,14 @@ body {
 .tab-btn:hover { background: rgba(255,255,255,.14); }
 .tab-btn.active { background: var(--white); color: var(--primary-dark); }
 .tab-content { display: none; }
+
+.product-tabs { display: flex; gap: 6px; margin-bottom: 12px; }
+.product-tab {
+  flex: 1; background: var(--white); border: 1.5px solid var(--border); color: var(--muted);
+  padding: 8px 8px; border-radius: 9px; font-size: 12.5px; font-weight: 700; cursor: pointer;
+  transition: all .15s; white-space: nowrap; box-shadow: 0 1px 4px rgba(0,0,0,.05);
+}
+.product-tab.active { background: var(--primary); border-color: var(--primary); color: var(--white); }
 .tab-content.active { display: block; }
 
 /* ── CARDS ── */
@@ -289,6 +297,8 @@ body {
 
     <!-- KUPONG -->
     <div class="tab-content active" id="tab-kupong">
+
+      <div class="product-tabs" id="product-tabs"></div>
 
       <div class="summary-bar" id="tally-bar" style="display:none">
         <div class="summary-item">
@@ -555,16 +565,19 @@ function updateAuthUI() {
 }
 
 // ── STATE ──
+const PRODUCTS = ['stryktipset', 'europatipset'];
+const PRODUCT_LABELS = { stryktipset: '⚽ Stryktipset', europatipset: '🇪🇺 Europatipset' };
+let selectedProduct = 'stryktipset';
 let state = { users: [], weeks: [] };
-let drawData = null;
-let drawUpdated = null;
-let decodePreview = null; // { system_type, rows, draw_number } while reviewing an upload, before save
+let drawData = { stryktipset: null, europatipset: null };
+let drawUpdated = { stryktipset: null, europatipset: null };
+let decodePreview = null; // { system_type, rows, draw_number, product } while reviewing an upload, before save
 let saveTimer = null;
 
 // ── INIT ──
 async function init() {
   await loadData();
-  await loadDraw();
+  await Promise.all(PRODUCTS.map(loadDraw));
 }
 async function loadData() {
   try {
@@ -594,28 +607,34 @@ function setSaveStatus(s) {
   el.textContent = s === 'saving' ? 'Sparar...' : s === 'saved' ? 'Sparat ✓' : '';
 }
 
-async function loadDraw() {
+async function loadDraw(product) {
   try {
-    const r = await fetch('/api/draw');
+    const r = await fetch(`/api/draw?product=${product}`);
     const data = await r.json();
-    drawData = data.draw;
-    drawUpdated = data.last_updated;
-  } catch (e) { console.error('loadDraw', e); }
+    drawData[product] = data.draw;
+    drawUpdated[product] = data.last_updated;
+  } catch (e) { console.error('loadDraw', product, e); }
   render();
 }
-async function refreshDraw() {
+async function refreshDraw(product) {
+  product = product || selectedProduct;
   try {
-    const r = await fetch('/api/refresh-draw', { method: 'POST' });
+    const r = await fetch(`/api/refresh-draw?product=${product}`, { method: 'POST' });
     const data = await r.json();
-    drawData = data.draw;
-    drawUpdated = data.last_updated;
+    drawData[product] = data.draw;
+    drawUpdated[product] = data.last_updated;
   } catch (e) { console.error(e); }
+  render();
+}
+function switchProduct(product) {
+  if (!PRODUCTS.includes(product) || product === selectedProduct) return;
+  selectedProduct = product;
   render();
 }
 
 // ── HELPERS ──
 function esc(s) { return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
-function findEvent(matchId) { return (drawData?.events || []).find(e => e.match_id === matchId) || null; }
+function findEvent(matchId) { return (drawData[selectedProduct]?.events || []).find(e => e.match_id === matchId) || null; }
 function fmtKickoff(iso) {
   if (!iso) return '';
   try {
@@ -662,8 +681,9 @@ function nextUploader() {
   return users[(state.weeks || []).length % users.length].display_name;
 }
 function currentWeek() {
-  if (!drawData) return null;
-  return (state.weeks || []).find(w => w.draw_number === drawData.draw_number) || null;
+  const draw = drawData[selectedProduct];
+  if (!draw) return null;
+  return (state.weeks || []).find(w => (w.product || 'stryktipset') === selectedProduct && w.draw_number === draw.draw_number) || null;
 }
 
 // ── TABS ──
@@ -677,6 +697,7 @@ function switchTab(name) {
 // ── RENDER ──
 function render() {
   updateAuthUI();
+  renderProductTabs();
   renderDrawMeta();
   renderKupong();
   renderHistory();
@@ -684,17 +705,24 @@ function render() {
   renderPlayers();
 }
 
+function renderProductTabs() {
+  const el = document.getElementById('product-tabs');
+  if (!el) return;
+  el.innerHTML = PRODUCTS.map(p =>
+    `<button class="product-tab${p === selectedProduct ? ' active' : ''}" onclick="switchProduct('${p}')">${PRODUCT_LABELS[p]}</button>`
+  ).join('');
+}
+
 function renderDrawMeta() {
   const el = document.getElementById('draw-meta');
   const upd = document.getElementById('draw-updated');
-  if (!drawData) { el.innerHTML = ''; return; }
-  const closeTime = drawData.reg_close_time ? new Date(drawData.reg_close_time).toLocaleString('sv-SE', { day:'numeric', month:'short', hour:'2-digit', minute:'2-digit', timeZone:'Europe/Stockholm' }) : '–';
-  const pot = drawData.current_net_sale ? Number(drawData.current_net_sale.replace(/\s/g,'').replace(',', '.')).toLocaleString('sv-SE') + ' kr' : '–';
-  el.innerHTML = `<span>Omgång <b>${drawData.draw_number ?? '–'}</b></span><span>Stänger <b>${closeTime}</b></span><span>Pott <b>${pot}</b></span>`;
-  if (drawUpdated) {
-    const d = new Date(drawUpdated);
-    upd.textContent = 'Uppdaterad ' + d.toLocaleTimeString('sv-SE', { hour: '2-digit', minute: '2-digit' });
-  }
+  const draw = drawData[selectedProduct];
+  if (!draw) { el.innerHTML = ''; if (upd) upd.textContent = ''; return; }
+  const closeTime = draw.reg_close_time ? new Date(draw.reg_close_time).toLocaleString('sv-SE', { day:'numeric', month:'short', hour:'2-digit', minute:'2-digit', timeZone:'Europe/Stockholm' }) : '–';
+  const pot = draw.current_net_sale ? Number(draw.current_net_sale.replace(/\s/g,'').replace(',', '.')).toLocaleString('sv-SE') + ' kr' : '–';
+  el.innerHTML = `<span>Omgång <b>${draw.draw_number ?? '–'}</b></span><span>Stänger <b>${closeTime}</b></span><span>Pott <b>${pot}</b></span>`;
+  const updated = drawUpdated[selectedProduct];
+  if (upd) upd.textContent = updated ? 'Uppdaterad ' + new Date(updated).toLocaleTimeString('sv-SE', { hour: '2-digit', minute: '2-digit' }) : '';
 }
 
 function renderKupong() {
@@ -708,7 +736,8 @@ function renderKupong() {
     return;
   }
 
-  if (!drawData) {
+  const draw = drawData[selectedProduct];
+  if (!draw) {
     tallyBar.style.display = 'none';
     document.getElementById('delete-week-btn').style.display = 'none';
     body.innerHTML = `<div class="loading-row">Hämtar aktuell omgång...</div>`;
@@ -724,7 +753,7 @@ function renderKupong() {
     body.innerHTML = `
       <div class="upload-zone">
         <div class="icon">📸</div>
-        <div>Ingen kupong uppladdad för omgång ${drawData.draw_number ?? '–'} än.</div>
+        <div>Ingen kupong uppladdad för omgång ${draw.draw_number ?? '–'} än.</div>
         ${suggestion ? `<div style="margin-top:6px;font-size:12px">Näst på tur: <b>${esc(suggestion)}</b></div>` : ''}
         ${authed ? `
           <div style="margin-top:14px">
@@ -795,7 +824,7 @@ function renderKupong() {
     </div>`;
   }).join('');
 
-  document.getElementById('kupong-title').textContent = `🎟️ Kupong v${drawData.draw_number ?? ''} – ${esc(week.uploaded_by || '')}`;
+  document.getElementById('kupong-title').textContent = `🎟️ ${PRODUCT_LABELS[selectedProduct]} v${draw.draw_number ?? ''} – ${esc(week.uploaded_by || '')}`;
   document.getElementById('delete-week-btn').style.display = '';
   tallyBar.style.display = '';
   document.getElementById('tally-correct').textContent = correct;
@@ -831,6 +860,7 @@ async function onCouponFileChosen() {
 
   const formData = new FormData();
   formData.append('image', file);
+  formData.append('product', selectedProduct);
 
   try {
     const r = await fetch('/api/coupon/decode', { method: 'POST', body: formData });
@@ -842,9 +872,10 @@ async function onCouponFileChosen() {
     }
     const session = getSession();
     decodePreview = {
+      product: selectedProduct,
       system_type: data.system_type || 'Enkelrad',
       rows: data.rows || [],
-      draw_number: data.draw_number ?? (drawData ? drawData.draw_number : null),
+      draw_number: data.draw_number ?? (drawData[selectedProduct] ? drawData[selectedProduct].draw_number : null),
       uploaded_by: session ? session.display_name : nextUploader(),
       imageUrl: URL.createObjectURL(file),
     };
@@ -909,6 +940,7 @@ function releaseDecodePreviewImage() {
 function cancelDecodePreview() { releaseDecodePreviewImage(); decodePreview = null; render(); }
 async function confirmDecodePreview() {
   const payload = {
+    product: decodePreview.product || selectedProduct,
     draw_number: decodePreview.draw_number,
     uploaded_by: decodePreview.uploaded_by,
     system_type: decodePreview.system_type,
@@ -966,9 +998,10 @@ function renderHistory() {
   body.innerHTML = weeks.map(w => {
     const { correct, total } = weekTally(w);
     const tallyStr = total ? `${correct}/${total} rätt` : 'Ej avgjord';
+    const productLabel = PRODUCT_LABELS[w.product || 'stryktipset'] || w.product;
     return `<div class="week-card-header">
       <div>
-        <div class="week-card-title">Omgång ${w.draw_number ?? '–'}</div>
+        <div class="week-card-title">${productLabel} · Omgång ${w.draw_number ?? '–'}</div>
         <div class="week-card-sub">${esc(w.uploaded_by || '')} · ${esc(w.system_type || 'Enkelrad')}</div>
       </div>
       <div style="display:flex;align-items:center;gap:10px">
