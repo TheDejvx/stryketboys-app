@@ -254,7 +254,7 @@ def decode_coupon():
         # alongside it) rather than expecting a perfect unassisted read.
         from google.genai import types as genai_types
         resp = client.models.generate_content(
-            model='gemini-2.5-pro',
+            model='gemini-3.1-pro-preview',
             contents=[
                 DESCRIBE_PROMPT,
                 genai_types.Part.from_bytes(data=img_bytes, mime_type=media_type),
