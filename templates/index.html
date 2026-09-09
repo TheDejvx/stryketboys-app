@@ -144,6 +144,7 @@ body {
 .match-row:last-child { border-bottom: none; }
 .match-row.low-conf { background: #fff8e1; }
 .match-row.tip-correct { background: var(--win-bg); }
+.match-row.tip-wrong { background: var(--loss-bg); }
 .match-row-left { min-width: 0; flex: 1; }
 .match-row-num { font-size: 10px; color: var(--muted); font-weight: 700; }
 .match-teams { font-weight: 600; font-size: 13.5px; line-height: 1.3; }
@@ -913,7 +914,7 @@ function buildWeekRows(week) {
       if (score) scoreHtml = `<span class="live-score">${esc(score)}</span>`;
       if (row.settled_result) {
         const hit = (row.picks || []).includes(row.settled_result);
-        badge = hit ? `<span class="match-badge badge-correct">✓ Rätt</span>` : `<span class="match-badge badge-incorrect">✗ Fel</span>`;
+        badge = `<span class="match-badge ${hit ? 'badge-correct' : 'badge-incorrect'}">Avslutad</span>`;
         if (hit) correct++; else wrong++;
       } else {
         badge = `<span class="match-badge badge-pending">Slutspelad – ange resultat</span>`;
@@ -926,9 +927,11 @@ function buildWeekRows(week) {
       pending++;
     }
 
-    // Tip matches the (live or final) outcome → highlight the whole row green. Tip is wrong →
-    // no red across the row/picks, just a box around whichever pill is the actual outcome.
+    // Tip matches the (live or final) outcome → highlight the whole row green. Tip is wrong while
+    // still live → just a box around the actual-outcome pill (can still flip before full time).
+    // Tip is wrong AND the match is finished → red tint too, since that result is now final.
     const tipHit = effectiveResult ? (row.picks || []).includes(effectiveResult) : null;
+    const tipMiss = finished && effectiveResult ? !tipHit : false;
     const pillsHtml = ['1', 'X', '2'].map(sign => {
       const selected = (row.picks || []).includes(sign);
       let cls = 'pick-pill';
@@ -952,7 +955,7 @@ function buildWeekRows(week) {
       ? ` · ${ev.odds_1.toFixed(2)} / ${ev.odds_x.toFixed(2)} / ${ev.odds_2.toFixed(2)}`
       : '';
 
-    return `<div class="match-row${tipHit ? ' tip-correct' : ''}">
+    return `<div class="match-row${tipHit ? ' tip-correct' : ''}${tipMiss ? ' tip-wrong' : ''}">
       <div class="match-row-left">
         <div class="match-row-num">#${row.row_num}</div>
         <div class="match-teams">${esc(row.home)} - ${esc(row.away)}</div>
