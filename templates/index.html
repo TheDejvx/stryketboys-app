@@ -149,7 +149,9 @@ body {
 .match-teams { font-weight: 600; font-size: 13.5px; line-height: 1.3; }
 .match-meta { font-size: 11px; color: var(--muted); margin-top: 2px; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 .match-row-right { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+.match-pills-row { display: flex; align-items: center; gap: 8px; }
 .match-pills { display: flex; gap: 4px; }
+.live-score { font-size: 18px; font-weight: 800; color: var(--primary-dark); letter-spacing: .3px; }
 
 .pick-pill {
   display: inline-flex; align-items: center; justify-content: center;
@@ -792,20 +794,16 @@ function buildWeekRows(week) {
     const effectiveResult = row.settled_result || liveSign;
 
     let badge = `<span class="match-badge badge-pending">Ej startad</span>`;
+    let scoreHtml = '';
     if (live) {
       const minuteText = ev && ev.live_minute ? ` ${esc(ev.live_minute)}` : '';
       const score = currentScore(ev);
-      const scoreText = score ? ` ${score}` : '';
-      if (liveSign) {
-        const hit = (row.picks || []).includes(liveSign);
-        badge = hit
-          ? `<span class="match-badge badge-correct">${scoreText.trim()} · Rätt just nu${minuteText}</span>`
-          : `<span class="match-badge badge-incorrect">${scoreText.trim()} · Fel just nu${minuteText}</span>`;
-      } else {
-        badge = `<span class="match-badge badge-live">Pågår${scoreText}${minuteText}</span>`;
-      }
+      if (score) scoreHtml = `<span class="live-score">${esc(score)}</span>`;
+      badge = `<span class="match-badge badge-live">Pågår${minuteText}</span>`;
     }
     if (finished) {
+      const score = currentScore(ev);
+      if (score) scoreHtml = `<span class="live-score">${esc(score)}</span>`;
       if (row.settled_result) {
         const hit = (row.picks || []).includes(row.settled_result);
         badge = hit ? `<span class="match-badge badge-correct">✓ Rätt</span>` : `<span class="match-badge badge-incorrect">✗ Fel</span>`;
@@ -851,7 +849,10 @@ function buildWeekRows(week) {
       </div>
       <div class="match-row-right">
         ${badge}
-        <div class="match-pills">${pillsHtml}</div>
+        <div class="match-pills-row">
+          ${scoreHtml}
+          <div class="match-pills">${pillsHtml}</div>
+        </div>
         ${manualPicker}
       </div>
     </div>`;
