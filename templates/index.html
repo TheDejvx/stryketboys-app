@@ -860,7 +860,6 @@ async function onCouponFileChosen() {
 
   const formData = new FormData();
   formData.append('image', file);
-  formData.append('product', selectedProduct);
 
   try {
     const r = await fetch('/api/coupon/decode', { method: 'POST', body: formData });
@@ -870,12 +869,14 @@ async function onCouponFileChosen() {
       if (btn) { btn.disabled = false; btn.textContent = '📤 Ladda upp kupong'; }
       return;
     }
+    const detectedProduct = PRODUCTS.includes(data.product) ? data.product : selectedProduct;
+    if (detectedProduct !== selectedProduct) selectedProduct = detectedProduct; // switch to whichever tab matches the coupon
     const session = getSession();
     decodePreview = {
-      product: selectedProduct,
+      product: detectedProduct,
       system_type: data.system_type || 'Enkelrad',
       rows: data.rows || [],
-      draw_number: data.draw_number ?? (drawData[selectedProduct] ? drawData[selectedProduct].draw_number : null),
+      draw_number: data.draw_number ?? (drawData[detectedProduct] ? drawData[detectedProduct].draw_number : null),
       uploaded_by: session ? session.display_name : nextUploader(),
       imageUrl: URL.createObjectURL(file),
     };
@@ -907,6 +908,10 @@ function decodePreviewHtml() {
 
   return `
     <div class="form-row" style="padding:14px 16px 0">
+      <label>Identifierad som</label>
+      <div style="font-size:14px;font-weight:600">${PRODUCT_LABELS[p.product] || p.product}</div>
+    </div>
+    <div class="form-row" style="padding:0 16px">
       <label>Systemtyp</label>
       <input id="preview-system-type" value="${esc(p.system_type)}" oninput="decodePreview.system_type=this.value">
     </div>

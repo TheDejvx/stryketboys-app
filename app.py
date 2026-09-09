@@ -174,11 +174,14 @@ def get_gemini():
 
 PRODUCT_LABELS = {'stryktipset': 'Stryktipset', 'europatipset': 'Europatipset'}
 
-def build_describe_prompt(product, expected_rows):
-    label = PRODUCT_LABELS.get(product, 'Stryktipset')
+def build_describe_prompt(expected_rows):
+    # Which product (Stryktipset vs Europatipset) this is gets auto-detected afterward by
+    # matching decoded team names against both products' live draws — not known yet here, and
+    # not needed: the product name was only ever cosmetic framing text, irrelevant to reading
+    # the pill grid itself.
     return (
-        f"This is a screenshot of a Svenska Spel {label} betting coupon (Swedish football pool betting). It "
-        f"has a numbered list of matches (usually {expected_rows}), each with three small pill-shaped buttons in "
+        f"This is a screenshot of a Svenska Spel Stryktipset- or Europatipset-style football pool betting "
+        f"coupon. It has a numbered list of matches (usually {expected_rows}), each with three small pill-shaped buttons in "
         "a fixed left-to-right order: '1', 'X', '2'. A pill is SELECTED if its background is a solid dark navy "
         "blue with white text, and NOT selected if its background is white/very light with a thin gray border "
         "and dark text.\n\n"
@@ -248,10 +251,6 @@ def decode_coupon():
     if 'image' not in request.files:
         return jsonify({'status': 'error', 'message': 'No image uploaded'}), 400
 
-    product = request.form.get('product', 'stryktipset')
-    if product not in PRODUCTS:
-        product = 'stryktipset'
-
     img = request.files['image']
     img_bytes = img.read()
     media_type = img.mimetype or 'image/jpeg'
@@ -262,9 +261,13 @@ def decode_coupon():
     except Exception as e:
         return jsonify({'status': 'error', 'message': f'Kunde inte läsa bildformatet: {e}'}), 400
 
-    draw = _draw_cache[product] or fetch_draw(product)
-    events = (draw or {}).get('events', [])
-    expected_rows = len(events) if events else 13
+    # Product isn't known yet — fetch both live draws up front so we can auto-detect
+    # afterward by matching decoded team names against each one's fixtures.
+    draws = {p: (_draw_cache[p] or fetch_draw(p)) for p in PRODUCTS}
+    row_counts = {len((draws[p] or {}).get('events', [])) for p in PRODUCTS if draws[p]}
+    row_counts.discard(0)
+    valid_row_counts = row_counts or {13}
+    expected_rows = max(valid_row_counts)
 
     try:
         # Single call: the model reasons in plain text first, then ends with a strict
@@ -276,7 +279,7 @@ def decode_coupon():
         resp = client.models.generate_content(
             model='gemini-3.5-flash',
             contents=[
-                build_describe_prompt(product, expected_rows),
+                build_describe_prompt(expected_rows),
                 genai_types.Part.from_bytes(data=img_bytes, mime_type=media_type),
             ],
         )
@@ -289,18 +292,33 @@ def decode_coupon():
         system_type, rows = parse_decode_analysis(analysis_text)
         if not rows:
             return jsonify({'status': 'error', 'message': 'Could not parse the model’s analysis — try again'}), 500
-        if len(rows) != expected_rows:
-            missing = sorted(set(range(1, expected_rows + 1)) - {r['row_num'] for r in rows})
-            print(f'WARNING: parsed {len(rows)} rows, expected {expected_rows} — missing row(s): {missing}')
+        if len(rows) not in valid_row_counts:
+            expected_str = '/'.join(str(n) for n in sorted(valid_row_counts))
+            print(f'WARNING: parsed {len(rows)} rows, expected one of {expected_str}')
             return jsonify({
                 'status': 'error',
-                'message': f'Läste bara {len(rows)} av {expected_rows} rader (saknar rad {", ".join(map(str, missing))}) — försök igen',
+                'message': f'Läste {len(rows)} rader, förväntade {expected_str} — försök igen',
             }), 500
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
-    for row in rows:
-        match, score = fuzzy_match_event(row.get('home', ''), row.get('away', ''), events)
+    # Auto-detect which product this is: fuzzy-match the decoded team names against each
+    # product's live draw and pick whichever one actually explains the coupon.
+    best_product, best_score, best_matches = None, -1.0, None
+    for p in PRODUCTS:
+        events = (draws[p] or {}).get('events', [])
+        if not events:
+            continue
+        matches = [fuzzy_match_event(r.get('home', ''), r.get('away', ''), events) for r in rows]
+        score = sum(s for _, s in matches)
+        print(f'product detection: {p} scored {score:.2f} across {len(rows)} rows')
+        if score > best_score:
+            best_product, best_score, best_matches = p, score, matches
+
+    if best_product is None:
+        best_product, best_matches = 'stryktipset', [(None, 0.0)] * len(rows)
+
+    for row, (match, score) in zip(rows, best_matches):
         if match and score > 0.55:
             row['match_id'] = match['match_id']
             row['match_start'] = match['match_start']
@@ -310,12 +328,13 @@ def decode_coupon():
             row['match_start'] = None
             row['low_confidence'] = True
 
+    draw = draws[best_product]
     return jsonify({
         'status': 'ok',
         'system_type': system_type,
         'rows': rows,
         'draw_number': (draw or {}).get('draw_number'),
-        'product': product,
+        'product': best_product,
     })
 
 @app.route('/api/coupon/save', methods=['POST'])
