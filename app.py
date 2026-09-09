@@ -129,9 +129,24 @@ def fetch_draw(product='stryktipset'):
         r.raise_for_status()
         payload = r.json()
         draws = payload.get('draws') or []
-        if not draws:
+        d = draws[0] if draws else None
+
+        if d is None:
+            # Confirmed live during a real Europatipset window: this "current draws" list goes
+            # empty the moment a draw closes for betting (drawState becomes "Closed") — even
+            # while its matches are actively being played. Without this fallback, fetch_draw()
+            # would just keep returning the stale pre-kickoff cache for the entire live window.
+            # The single-draw endpoint keeps working (and keeps reflecting live status/scores)
+            # as long as we already know the draw number from when it was still open.
+            last_known = (_draw_cache[product] or {}).get('draw_number')
+            if last_known:
+                r2 = req.get(f'https://api.spela.svenskaspel.se/draw/1/{product}/draws/{last_known}',
+                              headers={'User-Agent': 'Mozilla/5.0'}, timeout=15)
+                r2.raise_for_status()
+                d = (r2.json() or {}).get('draw')
+
+        if d is None:
             return _draw_cache[product]
-        d = draws[0]
 
         events = []
         for ev in d.get('drawEvents', []):
