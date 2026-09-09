@@ -948,11 +948,15 @@ function buildWeekRows(week) {
         ${['1','X','2'].map(s => `<span class="pick-pill editable" onclick="setManualResult('${esc(week.id)}',${row.row_num},'${s}')">${s}</span>`).join('')}
       </div>` : '';
 
+    const oddsText = (ev && ev.odds_1 != null && ev.odds_x != null && ev.odds_2 != null)
+      ? ` · ${ev.odds_1.toFixed(2)} / ${ev.odds_x.toFixed(2)} / ${ev.odds_2.toFixed(2)}`
+      : '';
+
     return `<div class="match-row${tipHit ? ' tip-correct' : ''}">
       <div class="match-row-left">
         <div class="match-row-num">#${row.row_num}</div>
         <div class="match-teams">${esc(row.home)} - ${esc(row.away)}</div>
-        <div class="match-meta">${esc(row.kickoff_time || '')}</div>
+        <div class="match-meta">${esc(row.kickoff_time || '')}${oddsText}</div>
       </div>
       <div class="match-row-right">
         ${badge}
