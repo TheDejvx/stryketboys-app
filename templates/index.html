@@ -54,6 +54,7 @@ body {
   color: var(--white); font-size: 17px; font-weight: 700;
   display: flex; align-items: center; gap: 8px;
 }
+.app-logo { width: 28px; height: 28px; border-radius: 8px; object-fit: cover; display: block; flex-shrink: 0; }
 .header-right { display: flex; align-items: center; gap: 10px; }
 .save-status { font-size: 12px; color: rgba(255,255,255,.7); }
 .save-status.saving { color: #ffd700; }
@@ -291,7 +292,7 @@ body {
 
 <div id="app">
   <div class="app-header">
-    <h1>⚽ StryketBoys</h1>
+    <h1><img src="/static/icon-192.png" alt="" class="app-logo">StryketBoys</h1>
     <div class="header-right">
       <span class="save-status" id="save-status"></span>
       <button class="lock-btn" id="lock-btn">🔒 Logga in</button>
