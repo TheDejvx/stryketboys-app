@@ -90,7 +90,14 @@ def public_data(data):
 
 PRODUCTS = ('stryktipset', 'europatipset')
 
-_draw_cache = {p: None for p in PRODUCTS}
+# {product: {draw_number: draw_dict}} — NOT a single "current draw" per product. A product can
+# have an older, not-yet-fully-settled week whose draw_number differs from whatever's currently
+# open for betting (e.g. Wednesday's Europatipset draw is still being tracked while a new one has
+# already opened by the weekend) — each needs its own independently-kept-fresh cache entry, found
+# the hard way: once a newer draw opened, the app silently stopped updating the older one's
+# results entirely (findEvent() found nothing, so isFinished()/settled_result froze mid-draw).
+_draw_cache = {p: {} for p in PRODUCTS}
+_current_draw_number = {p: None for p in PRODUCTS}
 _last_scraped = {p: None for p in PRODUCTS}
 
 def parse_odds(val):
@@ -124,81 +131,96 @@ def _last_saved_draw_number(product):
         print(f'_last_saved_draw_number error ({product}): {e}')
         return None
 
-def fetch_draw(product='stryktipset'):
-    """Pull the current draw (matches, odds, live status) for the given product
-    ('stryktipset' or 'europatipset') from Svenska Spel's public draws API — no
-    auth, no scraping needed."""
+def _parse_draw(d, product):
+    events = []
+    for ev in d.get('drawEvents', []):
+        m = ev.get('match', {}) or {}
+        participants = m.get('participants', []) or []
+        home = next((p.get('name', '') for p in participants if p.get('type') == 'home'), '')
+        away = next((p.get('name', '') for p in participants if p.get('type') == 'away'), '')
+        odds = ev.get('odds', {}) or {}
+        events.append({
+            'row_num': ev.get('eventNumber'),
+            'match_id': m.get('matchId'),
+            'home': home,
+            'away': away,
+            'league': (m.get('league') or {}).get('name', ''),
+            'match_start': m.get('matchStart'),
+            'status': m.get('status'),
+            'sport_event_status': m.get('sportEventStatus'),
+            'status_time': m.get('statusTime'),
+            'result': m.get('result'),
+            'odds_1': parse_odds(odds.get('one')),
+            'odds_x': parse_odds(odds.get('x')),
+            'odds_2': parse_odds(odds.get('two')),
+        })
+    events.sort(key=lambda x: x['row_num'] or 0)
+    return {
+        'product': product,
+        'draw_number': d.get('drawNumber'),
+        'draw_state': d.get('drawState'),
+        'reg_close_time': d.get('regCloseTime'),
+        'current_net_sale': d.get('currentNetSale'),
+        'events': events,
+    }
+
+def fetch_draw(product='stryktipset', draw_number=None):
+    """Pull a draw (matches, odds, live status) for the given product from Svenska Spel's public
+    draws API — no auth needed. draw_number=None means 'whichever draw is currently open for
+    betting' (via the list endpoint) and also updates _current_draw_number[product]; a specific
+    draw_number fetches that exact draw directly, which keeps working after it's closed/superseded
+    by a newer current draw — needed so an older not-yet-fully-settled week keeps getting fresh
+    live/final data instead of freezing the moment a new draw opens."""
     if product not in PRODUCTS:
         product = 'stryktipset'
     import requests as req
     try:
-        r = req.get(f'https://api.spela.svenskaspel.se/draw/1/{product}/draws',
-                     params={'numberOfDraws': 1},
-                     headers={'User-Agent': 'Mozilla/5.0'}, timeout=15)
-        r.raise_for_status()
-        payload = r.json()
-        draws = payload.get('draws') or []
-        d = draws[0] if draws else None
+        if draw_number is None:
+            r = req.get(f'https://api.spela.svenskaspel.se/draw/1/{product}/draws',
+                         params={'numberOfDraws': 1},
+                         headers={'User-Agent': 'Mozilla/5.0'}, timeout=15)
+            r.raise_for_status()
+            draws = (r.json() or {}).get('draws') or []
+            if not draws:
+                # Confirmed live during a real Europatipset window: this "current draws" list goes
+                # empty the moment a draw closes for betting — even while its matches are actively
+                # being played. Fall back to whatever we already know is current, or (cold start /
+                # after a redeploy wipes the in-memory cache) the most recently saved coupon.
+                fallback = _current_draw_number[product] or _last_saved_draw_number(product)
+                if not fallback:
+                    return None
+                return fetch_draw(product, draw_number=fallback)
+            parsed = _parse_draw(draws[0], product)
+            _current_draw_number[product] = parsed['draw_number']
+        else:
+            r = req.get(f'https://api.spela.svenskaspel.se/draw/1/{product}/draws/{draw_number}',
+                         headers={'User-Agent': 'Mozilla/5.0'}, timeout=15)
+            r.raise_for_status()
+            d = (r.json() or {}).get('draw')
+            if d is None:
+                return _draw_cache[product].get(draw_number)
+            parsed = _parse_draw(d, product)
 
-        if d is None:
-            # Confirmed live during a real Europatipset window: this "current draws" list goes
-            # empty the moment a draw closes for betting (drawState becomes "Closed") — even
-            # while its matches are actively being played. Without this fallback, fetch_draw()
-            # would just keep returning the stale pre-kickoff cache for the entire live window.
-            # The single-draw endpoint keeps working (and keeps reflecting live status/scores)
-            # as long as we know the draw number from when it was still open — from our own
-            # in-memory cache if this process has been running since then, or (crucially, since
-            # a redeploy wipes that cache — which is exactly what happened mid-live-window while
-            # building this fix) from the most recent saved coupon for this product as a fallback.
-            last_known = (_draw_cache[product] or {}).get('draw_number') or _last_saved_draw_number(product)
-            if last_known:
-                r2 = req.get(f'https://api.spela.svenskaspel.se/draw/1/{product}/draws/{last_known}',
-                              headers={'User-Agent': 'Mozilla/5.0'}, timeout=15)
-                r2.raise_for_status()
-                d = (r2.json() or {}).get('draw')
-
-        if d is None:
-            return _draw_cache[product]
-
-        events = []
-        for ev in d.get('drawEvents', []):
-            m = ev.get('match', {}) or {}
-            participants = m.get('participants', []) or []
-            home = next((p.get('name', '') for p in participants if p.get('type') == 'home'), '')
-            away = next((p.get('name', '') for p in participants if p.get('type') == 'away'), '')
-            odds = ev.get('odds', {}) or {}
-            events.append({
-                'row_num': ev.get('eventNumber'),
-                'match_id': m.get('matchId'),
-                'home': home,
-                'away': away,
-                'league': (m.get('league') or {}).get('name', ''),
-                'match_start': m.get('matchStart'),
-                'status': m.get('status'),
-                'sport_event_status': m.get('sportEventStatus'),
-                'status_time': m.get('statusTime'),
-                'result': m.get('result'),
-                'odds_1': parse_odds(odds.get('one')),
-                'odds_x': parse_odds(odds.get('x')),
-                'odds_2': parse_odds(odds.get('two')),
-            })
-        events.sort(key=lambda x: x['row_num'] or 0)
-
-        _draw_cache[product] = {
-            'product': product,
-            'draw_number': d.get('drawNumber'),
-            'draw_state': d.get('drawState'),
-            'reg_close_time': d.get('regCloseTime'),
-            'current_net_sale': d.get('currentNetSale'),
-            'events': events,
-        }
+        _draw_cache[product][parsed['draw_number']] = parsed
         _last_scraped[product] = datetime.now(timezone.utc)
-        print(f"{product}: fetched draw {_draw_cache[product]['draw_number']} with {len(events)} matches")
+        print(f"{product}: fetched draw {parsed['draw_number']} with {len(parsed['events'])} matches")
+        return parsed
     except Exception as e:
-        print(f'Draw fetch error ({product}): {e}')
-    return _draw_cache[product]
+        print(f'Draw fetch error ({product}, draw_number={draw_number}): {e}')
+        fallback_number = draw_number if draw_number is not None else _current_draw_number[product]
+        return _draw_cache[product].get(fallback_number) if fallback_number else None
 
-_result_cache = {p: None for p in PRODUCTS}
+def current_draw(product):
+    """The draw currently cached as 'open for betting' for this product, fetching fresh if we
+    don't have one yet."""
+    dn = _current_draw_number.get(product)
+    if dn and dn in _draw_cache.get(product, {}):
+        return _draw_cache[product][dn]
+    return fetch_draw(product)
+
+# {product: {draw_number: result_dict}} — same reasoning as _draw_cache: multiple draws per
+# product can be relevant at once (an older still-active week alongside a newer open one).
+_result_cache = {p: {} for p in PRODUCTS}
 
 def fetch_result(product, draw_number):
     """Once Svenska Spel fully finalizes a draw (all matches done + verified — this can lag
@@ -207,13 +229,14 @@ def fetch_result(product, draw_number):
     kronor per row for 10/11/12/13 rätt). Confirmed against a real past draw (4969): 404s until
     finalized, so a 404 here just means 'not settled yet', not an error."""
     if product not in PRODUCTS or not draw_number:
-        return _result_cache[product]
+        return None
+    cached = _result_cache[product].get(draw_number)
     import requests as req
     try:
         r = req.get(f'https://api.spela.svenskaspel.se/draw/1/{product}/draws/{draw_number}/result',
                      headers={'User-Agent': 'Mozilla/5.0'}, timeout=15)
         if r.status_code == 404:
-            return _result_cache[product]
+            return cached
         r.raise_for_status()
         result = (r.json() or {}).get('result') or {}
 
@@ -237,9 +260,9 @@ def fetch_result(product, draw_number):
         distribution.sort(key=lambda t: -t['correct'])
 
         if not outcomes and not distribution:
-            return _result_cache[product]
+            return cached
 
-        _result_cache[product] = {
+        _result_cache[product][draw_number] = {
             'draw_number': draw_number,
             'outcomes': outcomes,
             'distribution': distribution,
@@ -247,7 +270,8 @@ def fetch_result(product, draw_number):
         print(f"{product}: fetched final result for draw {draw_number} ({len(outcomes)} outcomes, {len(distribution)} payout tiers)")
     except Exception as e:
         print(f'Result fetch error ({product}, draw {draw_number}): {e}')
-    return _result_cache[product]
+        return cached
+    return _result_cache[product][draw_number]
 
 LIVE_POLL_SECONDS = 20
 IDLE_POLL_SECONDS = 90
@@ -279,6 +303,27 @@ def _looks_finished(ev):
     st = (ev.get('status') or '').lower()
     return any(k in s for k in ('end', 'finish', 'final')) or any(k in st for k in ('avslutad', 'slut'))
 
+def _active_draw_numbers(product):
+    """Draw numbers for this product's not-yet-fully-settled weeks — kept fresh independently of
+    whatever the 'current' open-for-betting draw is. Root cause of the Wednesday-coupon-frozen
+    bug: once a newer draw opened, this product's single cache slot got overwritten with it, so
+    the older week's match_ids no longer matched anything in drawData and its rows just stopped
+    updating (isFinished() never saw fresh data, so settled_result froze permanently)."""
+    try:
+        weeks = load_data().get('weeks', [])
+    except Exception as e:
+        print(f'_active_draw_numbers error ({product}): {e}')
+        return set()
+    numbers = set()
+    for w in weeks:
+        if w.get('product', 'stryktipset') != product:
+            continue
+        dn = w.get('draw_number')
+        rows = w.get('rows') or []
+        if dn and any(not r.get('settled_result') for r in rows):
+            numbers.add(dn)
+    return numbers
+
 def background_poller():
     time.sleep(5)
     while True:
@@ -288,10 +333,16 @@ def background_poller():
                 draw = fetch_draw(product)
                 if has_live_match(draw):
                     any_live = True
-                draw_number = (draw or {}).get('draw_number')
-                cached_result = _result_cache[product]
-                if draw_number and (not cached_result or cached_result.get('draw_number') != draw_number):
-                    fetch_result(product, draw_number)
+                draw_numbers = _active_draw_numbers(product)
+                current_dn = (draw or {}).get('draw_number')
+                if current_dn:
+                    draw_numbers.add(current_dn)
+                for dn in draw_numbers:
+                    d = draw if dn == current_dn else fetch_draw(product, draw_number=dn)
+                    if has_live_match(d):
+                        any_live = True
+                    if dn not in _result_cache[product]:
+                        fetch_result(product, dn)
             except Exception as e:
                 print(f'Background poller error ({product}): {e}')
         time.sleep(LIVE_POLL_SECONDS if any_live else IDLE_POLL_SECONDS)
@@ -408,7 +459,7 @@ def decode_coupon():
 
     # Product isn't known yet — fetch both live draws up front so we can auto-detect
     # afterward by matching decoded team names against each one's fixtures.
-    draws = {p: (_draw_cache[p] or fetch_draw(p)) for p in PRODUCTS}
+    draws = {p: current_draw(p) for p in PRODUCTS}
     row_counts = {len((draws[p] or {}).get('events', [])) for p in PRODUCTS if draws[p]}
     row_counts.discard(0)
     valid_row_counts = row_counts or {13}
@@ -573,20 +624,22 @@ def change_password():
     return jsonify({'status': 'ok'})
 
 def _result_for(product, draw):
-    """Only hand back a cached result if it actually matches the current draw — otherwise a
-    finalized result from last week could get shown against this week's fresh coupon."""
-    result = _result_cache[product]
+    """Only hand back a cached result if it actually matches the requested draw."""
     draw_number = (draw or {}).get('draw_number')
-    if result and draw_number and result.get('draw_number') == draw_number:
-        return result
-    return None
+    if not draw_number:
+        return None
+    return _result_cache[product].get(draw_number)
 
 @app.route('/api/draw')
 def get_draw():
     product = request.args.get('product', 'stryktipset')
     if product not in PRODUCTS:
         product = 'stryktipset'
-    draw = _draw_cache[product] or fetch_draw(product)
+    draw_number = request.args.get('draw_number', type=int)
+    if draw_number:
+        draw = _draw_cache[product].get(draw_number) or fetch_draw(product, draw_number=draw_number)
+    else:
+        draw = current_draw(product)
     last = _last_scraped[product]
     return jsonify({'draw': draw, 'last_updated': last.isoformat() if last else None, 'has_live': has_live_match(draw), 'result': _result_for(product, draw)})
 
@@ -595,7 +648,8 @@ def refresh_draw():
     product = request.args.get('product', 'stryktipset')
     if product not in PRODUCTS:
         product = 'stryktipset'
-    draw = fetch_draw(product)
+    draw_number = request.args.get('draw_number', type=int)
+    draw = fetch_draw(product, draw_number=draw_number) if draw_number else fetch_draw(product)
     last = _last_scraped[product]
     if draw and draw.get('draw_number'):
         fetch_result(product, draw['draw_number'])

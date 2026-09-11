@@ -603,16 +603,49 @@ const PRODUCTS = ['stryktipset', 'europatipset'];
 const PRODUCT_LABELS = { stryktipset: '⚽ Stryktipset', europatipset: '🇪🇺 Europatipset' };
 let selectedProduct = 'stryktipset';
 let state = { users: [], weeks: [] };
-let drawData = { stryktipset: null, europatipset: null };
-let drawUpdated = { stryktipset: null, europatipset: null };
-let drawResult = { stryktipset: null, europatipset: null }; // { draw_number, outcomes: {matchId: sign}, distribution: [{correct,winners,amount}] } once finalized
+// Keyed by draw_number, not just product — a product can have an older, not-yet-fully-settled
+// week whose draw_number differs from whatever's currently open for betting (e.g. a Wednesday
+// Europatipset coupon still being tracked after a newer draw has already opened). Each needs its
+// own independently-fetched, independently-fresh cache entry — found the hard way: with a single
+// per-product cache, the older draw's data silently stopped updating the moment a newer one
+// replaced it, freezing that week's results mid-draw.
+let drawCache = { stryktipset: {}, europatipset: {} };        // { [drawNumber]: draw object }
+let drawUpdatedCache = { stryktipset: {}, europatipset: {} }; // { [drawNumber]: last_updated string }
+let drawResultCache = { stryktipset: {}, europatipset: {} };  // { [drawNumber]: {outcomes, distribution} }
+let currentDrawNumber = { stryktipset: null, europatipset: null }; // whichever draw is open for betting right now
+function drawFor(product, drawNumber) { return (drawCache[product] || {})[drawNumber] || null; }
+function currentDraw(product) { const dn = currentDrawNumber[product]; return dn ? drawFor(product, dn) : null; }
+function resultFor(product, drawNumber) { return (drawResultCache[product] || {})[drawNumber] || null; }
+function updatedFor(product, drawNumber) { return (drawUpdatedCache[product] || {})[drawNumber] || null; }
 let decodePreview = null; // { system_type, rows, draw_number, product } while reviewing an upload, before save
 let saveTimer = null;
 
 // ── INIT ──
 async function init() {
-  await loadData();
-  await Promise.all(PRODUCTS.map(loadDraw));
+  await loadData(); // populates state.weeks first — neededDraws() below reads it
+  await loadAllDraws();
+}
+// Every draw_number we need fresh data for right now: each product's currently-open draw, plus
+// every product's not-yet-fully-settled week's draw_number (which can differ from "current" —
+// see the drawCache comment above for why that distinction is the whole point).
+function neededDraws() {
+  const needed = { stryktipset: new Set(), europatipset: new Set() };
+  (state.weeks || []).forEach(w => {
+    const product = w.product || 'stryktipset';
+    const rows = w.rows || [];
+    const stillActive = rows.some(r => !r.settled_result);
+    if (stillActive && w.draw_number) needed[product].add(w.draw_number);
+  });
+  return needed;
+}
+async function loadAllDraws() {
+  const needed = neededDraws();
+  const tasks = [];
+  for (const product of PRODUCTS) {
+    tasks.push(loadDraw(product));
+    needed[product].forEach(dn => tasks.push(loadDraw(product, dn)));
+  }
+  await Promise.all(tasks);
 }
 async function loadData() {
   try {
@@ -642,39 +675,51 @@ function setSaveStatus(s) {
   el.textContent = s === 'saving' ? 'Sparar...' : s === 'saved' ? 'Sparat ✓' : '';
 }
 
-async function loadDraw(product) {
+// drawNumber omitted → the product's currently-open-for-betting draw (also updates
+// currentDrawNumber[product]); given → that specific draw, current or not.
+async function loadDraw(product, drawNumber) {
   try {
-    const r = await fetch(`/api/draw?product=${product}`);
+    const url = `/api/draw?product=${product}` + (drawNumber ? `&draw_number=${drawNumber}` : '');
+    const r = await fetch(url);
     const data = await r.json();
-    drawData[product] = data.draw;
-    drawUpdated[product] = data.last_updated;
-    drawResult[product] = data.result;
-  } catch (e) { console.error('loadDraw', product, e); }
+    const dn = data.draw && data.draw.draw_number;
+    if (dn) {
+      drawCache[product][dn] = data.draw;
+      drawUpdatedCache[product][dn] = data.last_updated;
+      drawResultCache[product][dn] = data.result;
+      if (!drawNumber) currentDrawNumber[product] = dn;
+    }
+  } catch (e) { console.error('loadDraw', product, drawNumber, e); }
   render();
 }
-async function refreshDraw(product) {
+async function refreshDraw(product, drawNumber) {
   try {
-    const r = await fetch(`/api/refresh-draw?product=${product}`, { method: 'POST' });
+    const url = `/api/refresh-draw?product=${product}` + (drawNumber ? `&draw_number=${drawNumber}` : '');
+    const r = await fetch(url, { method: 'POST' });
     const data = await r.json();
-    drawData[product] = data.draw;
-    drawUpdated[product] = data.last_updated;
-    drawResult[product] = data.result;
+    const dn = data.draw && data.draw.draw_number;
+    if (dn) {
+      drawCache[product][dn] = data.draw;
+      drawUpdatedCache[product][dn] = data.last_updated;
+      drawResultCache[product][dn] = data.result;
+      if (!drawNumber) currentDrawNumber[product] = dn;
+    }
   } catch (e) { console.error(e); }
   render();
 }
-async function manualRefresh(product, btn) {
+async function manualRefresh(product, btn, drawNumber) {
   if (btn) { btn.disabled = true; btn.textContent = '⏳'; }
-  await refreshDraw(product);
+  await refreshDraw(product, drawNumber);
   if (btn) { btn.disabled = false; btn.textContent = '🔄'; }
 }
-// Poll both products' cached draws so live status/scores update without a manual reload — both
-// can have an active coupon shown at once now, so both need to stay fresh. The server already
-// caches upstream data and self-throttles its own poll speed based on whether a match is live,
-// so this client poll is just cheap re-reads of that cache.
-setInterval(() => { PRODUCTS.forEach(loadDraw); }, 20000);
+// Poll every draw currently relevant (current-per-product + every active week's own draw) so
+// live status/scores update without a manual reload. The server already caches upstream data and
+// self-throttles its own poll speed based on whether a match is live, so this client poll is just
+// cheap re-reads of that cache.
+setInterval(() => { loadAllDraws(); }, 20000);
 // ── HELPERS ──
 function esc(s) { return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
-function findEvent(matchId, product) { return (drawData[product]?.events || []).find(e => e.match_id === matchId) || null; }
+function findEvent(matchId, product, drawNumber) { return (drawFor(product, drawNumber)?.events || []).find(e => e.match_id === matchId) || null; }
 function fmtKickoff(iso) {
   if (!iso) return '';
   try {
@@ -709,7 +754,7 @@ function isInterrupted(ev) {
   const st = (ev.status || '').toLowerCase();
   return /interrupted|suspended|abandoned/.test(s) || /avbruten/.test(st);
 }
-// Prefer the official settled outcome (drawResult[product].outcomes[matchId], see buildWeekRows)
+// Prefer the official settled outcome (resultFor(product, drawNumber).outcomes[matchId], see buildWeekRows)
 // once Svenska Spel finalizes the draw — exact, no guessing. This score-based derivation is only
 // the live/pre-finalization fallback. Verified against a real finished match (draw 4969):
 // match.result is an array of {sportEventResultType, home, away}; the Fulltime entry's
@@ -828,7 +873,7 @@ function renderUploaderSchedule() {
   const el = document.getElementById('uploader-schedule');
   if (!el) return;
   const rotation = state.uploader_rotation || [];
-  const draw = drawData.stryktipset;
+  const draw = currentDraw('stryktipset');
   if (!rotation.length || !draw || !draw.reg_close_time) { el.innerHTML = ''; return; }
 
   const anchor = new Date(draw.reg_close_time);
@@ -857,7 +902,7 @@ function renderUploaderSchedule() {
 function drawMetaHtml(draw, product) {
   const closeTime = draw.reg_close_time ? new Date(draw.reg_close_time).toLocaleString('sv-SE', { day:'numeric', month:'short', hour:'2-digit', minute:'2-digit', timeZone:'Europe/Stockholm' }) : '–';
   const pot = draw.current_net_sale ? Number(draw.current_net_sale.replace(/\s/g,'').replace(',', '.')).toLocaleString('sv-SE') + ' kr' : '–';
-  const updated = drawUpdated[product];
+  const updated = updatedFor(product, draw.draw_number);
   const updatedStr = updated ? 'Uppdaterad ' + new Date(updated).toLocaleTimeString('sv-SE', { hour: '2-digit', minute: '2-digit' }) : '';
   return `<div class="draw-meta"><span>Omgång <b>${draw.draw_number ?? '–'}</b></span><span>Stänger <b>${closeTime}</b></span><span>Pott <b>${pot}</b></span><span style="margin-left:auto">${updatedStr}</span></div>`;
 }
@@ -887,17 +932,22 @@ function uploadPromptHtml(product, draw) {
 // Historik detail expand, so both show identical, always-current row state.
 function buildWeekRows(week) {
   const product = week.product || 'stryktipset';
+  const drawNumber = week.draw_number;
   let correct = 0, wrong = 0, pending = 0, changed = false, allFinished = true;
 
   const rowsHtml = (week.rows || []).map(row => {
-    const ev = findEvent(row.match_id, product);
-    const finished = isFinished(ev);
-    const live = isLive(ev);
+    const ev = findEvent(row.match_id, product, drawNumber);
+    // A row with an already-stored settled_result counts as finished even if we don't have fresh
+    // ev data for it right now (e.g. an old Historik week whose draw isn't being actively polled
+    // anymore) — settlement, once recorded, shouldn't regress to "Ej startad" just because we
+    // stopped re-fetching a draw that's long since been fully decided.
+    const finished = isFinished(ev) || !!row.settled_result;
+    const live = !row.settled_result && isLive(ev);
     if (!finished) allFinished = false;
 
     // Once Svenska Spel finalizes the draw, its official outcome always wins over our own
     // score-derived guess (and can correct an earlier live-derived or manual entry).
-    const official = drawResult[product]?.outcomes?.[String(row.match_id)];
+    const official = resultFor(product, drawNumber)?.outcomes?.[String(row.match_id)];
     if (finished) {
       if (official && row.settled_result !== official) {
         row.settled_result = official;
@@ -996,8 +1046,8 @@ function buildWeekRows(week) {
 // matches done + verified — this lags kickoff by hours, sometimes not same-day). There's no
 // live/preliminary payout data to show before that — so pending is shown honestly rather than
 // faked with a guessed number.
-function payoutBannerHtml(product, correct, pending) {
-  const distribution = drawResult[product]?.distribution;
+function payoutBannerHtml(product, drawNumber, correct, pending) {
+  const distribution = resultFor(product, drawNumber)?.distribution;
   if (!distribution || !distribution.length) {
     const msg = pending > 0 ? 'Utdelning fastställs efter alla matcher' : 'Utdelning fastställs inom kort (Svenska Spel verifierar resultatet)';
     return `<div class="payout-banner pending">${msg}</div>`;
@@ -1009,8 +1059,8 @@ function payoutBannerHtml(product, correct, pending) {
   return `<div class="payout-banner none">Ingen vinst denna omgång (${correct} rätt)</div>`;
 }
 
-function payoutTableHtml(product, correct) {
-  const distribution = drawResult[product]?.distribution;
+function payoutTableHtml(product, drawNumber, correct) {
+  const distribution = resultFor(product, drawNumber)?.distribution;
   if (!distribution || !distribution.length) return '';
   const rows = [...distribution].sort((a, b) => b.correct - a.correct).map(t => {
     const mine = t.correct === correct;
@@ -1035,7 +1085,7 @@ function fmtKr(amount) {
 function weekCardHtml(week, built, opts) {
   opts = opts || {};
   const product = week.product || 'stryktipset';
-  const draw = drawData[product];
+  const draw = drawFor(product, week.draw_number);
   const total = (week.rows || []).length;
   const title = `🎟️ ${PRODUCT_LABELS[product] || product} v${week.draw_number ?? '–'} – ${esc(week.uploaded_by || '')} · ${built.correct}/${total} rätt`;
   const tallyHtml = `
@@ -1044,9 +1094,9 @@ function weekCardHtml(week, built, opts) {
       <div class="summary-item"><div class="label">Fel</div><div class="value negative">${built.wrong}</div></div>
       <div class="summary-item"><div class="label">Kvar</div><div class="value">${built.pending}</div></div>
     </div>`;
-  const refreshBtn = opts.showRefresh ? `<button class="btn-ghost" onclick="manualRefresh('${product}', this)" title="Uppdatera nu">🔄</button>` : '';
+  const refreshBtn = opts.showRefresh ? `<button class="btn-ghost" onclick="manualRefresh('${product}', this, ${week.draw_number})" title="Uppdatera nu">🔄</button>` : '';
   const deleteBtn = opts.showDelete ? `<button class="btn-delete" onclick="event.stopPropagation(); deleteWeek('${esc(week.id)}')" title="Ta bort kupong">🗑 Ta bort</button>` : '';
-  const payoutTable = payoutTableHtml(product, built.correct);
+  const payoutTable = payoutTableHtml(product, week.draw_number, built.correct);
   return `
     ${tallyHtml}
     <div class="card">
@@ -1058,7 +1108,7 @@ function weekCardHtml(week, built, opts) {
       <div class="matches-meta" style="padding:8px 16px;color:var(--muted);font-size:11px">${esc(week.system_type || 'Enkelrad')}</div>
       ${built.rowsHtml}
     </div>
-    ${payoutBannerHtml(product, built.correct, built.pending)}
+    ${payoutBannerHtml(product, week.draw_number, built.correct, built.pending)}
     ${payoutTable ? `<div class="card">${payoutTable}</div>` : ''}`;
 }
 
@@ -1074,7 +1124,7 @@ function renderKupong() {
   let anyChanged = false;
   const sections = [];
   for (const product of PRODUCTS) {
-    const draw = drawData[product];
+    const draw = currentDraw(product);
     const activeWeeks = (state.weeks || [])
       .filter(w => (w.product || 'stryktipset') === product)
       .map(w => ({ week: w, built: buildWeekRows(w) }))
@@ -1134,7 +1184,7 @@ async function onCouponFileChosen(input) {
       product: detectedProduct,
       system_type: data.system_type || 'Enkelrad',
       rows: data.rows || [],
-      draw_number: data.draw_number ?? (drawData[detectedProduct] ? drawData[detectedProduct].draw_number : null),
+      draw_number: data.draw_number ?? (currentDraw(detectedProduct) ? currentDraw(detectedProduct).draw_number : null),
       uploaded_by: session ? session.display_name : nextUploader(),
       imageUrl: URL.createObjectURL(file),
     };
@@ -1280,10 +1330,10 @@ function renderHistory() {
       const built = buildWeekRows(w);
       if (built.changed) anyChanged = true;
       detailHtml = `<div class="week-detail">
-        ${payoutBannerHtml(product, built.correct, built.pending)}
+        ${payoutBannerHtml(product, w.draw_number, built.correct, built.pending)}
         <div class="matches-meta" style="padding:8px 16px;color:var(--muted);font-size:11px">${esc(w.system_type || 'Enkelrad')}</div>
         ${built.rowsHtml}
-        ${payoutTableHtml(product, built.correct)}
+        ${payoutTableHtml(product, w.draw_number, built.correct)}
       </div>`;
     }
     return `<div class="week-card">
