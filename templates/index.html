@@ -916,19 +916,27 @@ function drawMetaHtml(draw, product) {
   return `<div class="draw-meta"><span>Omgång <b>${draw.draw_number ?? '–'}</b></span><span>Stänger <b>${closeTime}</b></span><span>Pott <b>${pot}</b></span><span style="margin-left:auto">${updatedStr}</span></div>`;
 }
 
-function uploadPromptHtml(product, draw) {
+// One shared upload entry point covering every product that still needs a coupon this week —
+// the product itself is auto-detected server-side at decode time (see CLAUDE.md), so there's
+// no reason to make the user pick which button to click; a single button just lists what's
+// still pending underneath it. `missing` is an array of {product, draw}.
+function uploadPromptHtml(missing) {
   const authed = checkAuth();
   const suggestion = nextUploader();
+  const pendingLines = missing.map(({ product, draw }) =>
+    `<div>${PRODUCT_LABELS[product]}: omgång ${draw.draw_number ?? '–'}</div>`
+  ).join('');
   return `<div class="card">
-    <div class="card-header"><h2>${PRODUCT_LABELS[product]}</h2></div>
+    <div class="card-header"><h2>📸 Ladda upp kupong</h2></div>
     <div class="upload-zone">
       <div class="icon">📸</div>
-      <div>Ingen kupong uppladdad för omgång ${draw.draw_number ?? '–'} än.</div>
+      <div>Ingen kupong uppladdad än för:</div>
+      ${pendingLines}
       ${suggestion ? `<div style="margin-top:6px;font-size:12px">Näst på tur: <b>${esc(suggestion)}</b></div>` : ''}
       ${authed ? `
         <div style="margin-top:14px">
-          <input type="file" accept="image/*" id="coupon-file-${product}" style="display:none" onchange="onCouponFileChosen(this)">
-          <button class="btn btn-primary" onclick="document.getElementById('coupon-file-${product}').click()">📤 Ladda upp kupong</button>
+          <input type="file" accept="image/*" id="coupon-file" style="display:none" onchange="onCouponFileChosen(this)">
+          <button class="btn btn-primary" onclick="document.getElementById('coupon-file').click()">📤 Ladda upp kupong</button>
         </div>
         <div class="upload-status" style="margin-top:10px;font-size:12px;color:var(--muted)"></div>
       ` : `<div style="margin-top:14px;font-size:12px">Lås upp för att ladda upp en kupong.</div>`}
@@ -1132,6 +1140,7 @@ function renderKupong() {
 
   let anyChanged = false;
   const sections = [];
+  const missing = []; // {product, draw} for every product whose current draw has no coupon yet
   for (const product of PRODUCTS) {
     const draw = currentDraw(product);
     const activeWeeks = (state.weeks || [])
@@ -1144,11 +1153,12 @@ function renderKupong() {
       activeWeeks.forEach(({ week, built }) => sections.push(weekCardHtml(week, built, { showRefresh: true, showDelete: true })));
     } else if (draw) {
       const hasWeekForCurrentDraw = (state.weeks || []).some(w => (w.product || 'stryktipset') === product && w.draw_number === draw.draw_number);
-      if (!hasWeekForCurrentDraw) sections.push(uploadPromptHtml(product, draw));
+      if (!hasWeekForCurrentDraw) missing.push({ product, draw });
     } else {
       sections.push(`<div class="card"><div class="loading-row">Hämtar ${PRODUCT_LABELS[product]}...</div></div>`);
     }
   }
+  if (missing.length) sections.push(uploadPromptHtml(missing));
 
   container.innerHTML = sections.length ? sections.join('') : `<div class="card"><div class="no-data"><div class="icon">🎟️</div><div>Inga aktiva kuponger just nu.</div></div></div>`;
   if (anyChanged) saveDataDebounced();
