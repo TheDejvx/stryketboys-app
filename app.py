@@ -5,6 +5,7 @@ from difflib import SequenceMatcher
 from werkzeug.security import generate_password_hash, check_password_hash
 from PIL import Image
 
+# Deploy test: confirms pushes from Claude Code on the web reach Railway.
 app = Flask(__name__)
 DATA_FILE = os.path.join(os.path.dirname(__file__), 'stryk_data.json')
 
