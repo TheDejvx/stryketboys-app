@@ -1206,6 +1206,7 @@ async function onCouponFileChosen(input) {
       draw_number: data.draw_number ?? (currentDraw(detectedProduct) ? currentDraw(detectedProduct).draw_number : null),
       uploaded_by: session ? session.display_name : nextUploader(),
       imageUrl: URL.createObjectURL(file),
+      imageFile: file,
     };
     render();
   } catch (e) {
@@ -1274,6 +1275,14 @@ function releaseDecodePreviewImage() {
   if (decodePreview && decodePreview.imageUrl) URL.revokeObjectURL(decodePreview.imageUrl);
 }
 function cancelDecodePreview() { releaseDecodePreviewImage(); decodePreview = null; render(); }
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result.split(',')[1]); // strip the "data:...;base64," prefix
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
 async function confirmDecodePreview() {
   // Never create a second week for a product+draw_number that already has one — if a coupon
   // somehow already exists for this exact draw, saving upserts it in place instead of duplicating.
@@ -1292,6 +1301,10 @@ async function confirmDecodePreview() {
       marked: !!r.marked,
     })),
   };
+  if (decodePreview.imageFile) {
+    try { payload.image_base64 = await fileToBase64(decodePreview.imageFile); }
+    catch (e) { console.error('Could not read image for storage', e); }
+  }
   try {
     const r = await fetch('/api/coupon/save', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
     const data = await r.json();
@@ -1320,6 +1333,7 @@ function deleteWeek(weekId) {
     state.weeks = (state.weeks || []).filter(w => w.id !== weekId);
     render();
     saveData();
+    fetch(`/api/coupon/image/${encodeURIComponent(weekId)}`, { method: 'DELETE' }).catch(() => {});
   });
 }
 
@@ -1358,6 +1372,12 @@ function renderHistory() {
         <div class="matches-meta" style="padding:8px 16px;color:var(--muted);font-size:11px">${esc(w.system_type || 'Enkelrad')}</div>
         ${built.rowsHtml}
         ${payoutTableHtml(product, w.draw_number, built.correct)}
+        ${w.has_image ? `
+          <div style="padding:14px 16px;border-top:1px solid var(--border)">
+            <div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;margin-bottom:8px">Originalbild</div>
+            <img src="/api/coupon/image/${esc(w.id)}" alt="Uppladdad kupong" style="width:100%;border-radius:8px;border:1px solid var(--border);display:block" onerror="this.closest('div').style.display='none'">
+          </div>
+        ` : ''}
       </div>`;
     }
     return `<div class="week-card">
