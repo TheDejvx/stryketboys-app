@@ -1,4 +1,4 @@
-from flask import Flask, render_template, jsonify, request
+from flask import Flask, render_template, jsonify, request, Response
 import json, os, re, threading, time, base64, io
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
@@ -58,6 +58,70 @@ def save_data(data):
     else:
         with open(DATA_FILE, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
+
+# Coupon photos are stored separately from the main stryk_state document, not embedded in
+# week['rows'] etc — that single document is replaced wholesale on every save (including
+# frequent, unrelated ones like a manual result tap), so piling image bytes into it would mean
+# re-sending every stored photo over the wire on every such save, and risks hitting MongoDB's
+# 16MB document cap after a season or two of accumulated coupons. Keyed by week id instead, in
+# its own `stryk_images` collection (Mongo) or a local `coupon_images/` folder (JSON fallback).
+COUPON_IMAGES_DIR = os.path.join(os.path.dirname(__file__), 'coupon_images')
+
+def store_coupon_image(week_id, raw_bytes):
+    """Re-encode to a bounded JPEG before persisting — phone screenshots can be several MB each,
+    and this keeps per-image storage small across a season of accumulated coupons. Falls back to
+    storing the original bytes if re-encoding fails for any reason (unusual format, corrupt data)
+    rather than losing the upload entirely."""
+    try:
+        img = Image.open(io.BytesIO(raw_bytes))
+        img.load()
+        if img.mode != 'RGB':
+            img = img.convert('RGB')
+        max_w = 1400
+        if img.width > max_w:
+            img = img.resize((max_w, round(img.height * max_w / img.width)), Image.LANCZOS)
+        buf = io.BytesIO()
+        img.save(buf, format='JPEG', quality=82)
+        jpeg_bytes = buf.getvalue()
+    except Exception as e:
+        print(f'store_coupon_image: re-encode failed, storing original bytes ({e})')
+        jpeg_bytes = raw_bytes
+
+    db = get_db()
+    if db is not None:
+        db.stryk_images.replace_one(
+            {'_id': week_id},
+            {'_id': week_id, 'image_base64': base64.b64encode(jpeg_bytes).decode('ascii'), 'mime_type': 'image/jpeg'},
+            upsert=True,
+        )
+    else:
+        os.makedirs(COUPON_IMAGES_DIR, exist_ok=True)
+        with open(os.path.join(COUPON_IMAGES_DIR, f'{week_id}.jpg'), 'wb') as f:
+            f.write(jpeg_bytes)
+
+def get_coupon_image(week_id):
+    """Returns (bytes, mime_type) or None if no photo was ever stored for this week (e.g. a week
+    saved before this feature shipped)."""
+    db = get_db()
+    if db is not None:
+        doc = db.stryk_images.find_one({'_id': week_id})
+        if not doc:
+            return None
+        return base64.b64decode(doc['image_base64']), doc.get('mime_type', 'image/jpeg')
+    path = os.path.join(COUPON_IMAGES_DIR, f'{week_id}.jpg')
+    if not os.path.exists(path):
+        return None
+    with open(path, 'rb') as f:
+        return f.read(), 'image/jpeg'
+
+def delete_coupon_image(week_id):
+    db = get_db()
+    if db is not None:
+        db.stryk_images.delete_one({'_id': week_id})
+    else:
+        path = os.path.join(COUPON_IMAGES_DIR, f'{week_id}.jpg')
+        if os.path.exists(path):
+            os.remove(path)
 
 def find_user(data, username):
     username = (username or '').strip().lower()
@@ -554,6 +618,17 @@ def save_coupon():
     if product not in PRODUCTS:
         product = 'stryktipset'
     week_id = payload.get('id') or f"week-{product}-{payload.get('draw_number', 'x')}-{int(time.time())}"
+
+    idx = next((i for i, w in enumerate(weeks) if w.get('id') == week_id), None)
+    has_image = weeks[idx].get('has_image', False) if idx is not None else False
+    image_b64 = payload.get('image_base64')
+    if image_b64:
+        try:
+            store_coupon_image(week_id, base64.b64decode(image_b64))
+            has_image = True
+        except Exception as e:
+            print(f'save_coupon: failed to store image ({e})')
+
     week = {
         'id': week_id,
         'product': product,
@@ -561,10 +636,10 @@ def save_coupon():
         'uploaded_by': payload.get('uploaded_by'),
         'system_type': payload.get('system_type', 'Enkelrad'),
         'rows': payload.get('rows', []),
+        'has_image': has_image,
         'created_at': datetime.now(timezone.utc).isoformat(),
     }
 
-    idx = next((i for i, w in enumerate(weeks) if w.get('id') == week_id), None)
     if idx is not None:
         weeks[idx] = week
     else:
@@ -572,6 +647,17 @@ def save_coupon():
 
     save_data(data)
     return jsonify({'status': 'ok', 'week': week})
+
+@app.route('/api/coupon/image/<week_id>', methods=['GET', 'DELETE'])
+def coupon_image(week_id):
+    if request.method == 'DELETE':
+        delete_coupon_image(week_id)
+        return jsonify({'status': 'ok'})
+    result = get_coupon_image(week_id)
+    if result is None:
+        return '', 404
+    img_bytes, mime_type = result
+    return Response(img_bytes, mimetype=mime_type)
 
 
 # ── ROUTES ──
