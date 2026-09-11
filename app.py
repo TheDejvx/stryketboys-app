@@ -382,6 +382,10 @@ def build_describe_prompt(expected_rows):
         "a fixed left-to-right order: '1', 'X', '2'. A pill is SELECTED if its background is a solid dark navy "
         "blue with white text, and NOT selected if its background is white/very light with a thin gray border "
         "and dark text.\n\n"
+        "Some rows ALSO have a small separate square badge with just the letter 'M' in it (dark outline, white "
+        "or light fill), positioned between the kickoff time/live score and the three pills — clearly separate "
+        "from the '1'/'X'/'2' pills themselves, and only present on some rows, not all. Check for this badge on "
+        "every row independently; do not assume it repeats or skips in any pattern.\n\n"
         "Process the rows ONE AT A TIME, in strict order from the first row to the last. Do NOT skip ahead and do "
         "NOT batch multiple rows together — for EVERY row, immediately after analyzing it, output its result line "
         "before moving to the next row.\n\n"
@@ -391,18 +395,23 @@ def build_describe_prompt(expected_rows):
         "Analysis: name the two teams, then describe what you see for the '1', 'X', '2' pills individually — do "
         "not assume a pattern from previous rows, and do not stop looking after finding the first selected pill. "
         "It is common and expected for two pills to be selected on the same row at once (e.g. X and 2 both "
-        "selected, 1 empty) — this is a normal 'garderad rad' (system bet row), not an error.\n"
-        "ROW <n> | <home team> - <away team> | <kickoff text> | 1=<0 or 1> X=<0 or 1> 2=<0 or 1>\n\n"
-        "Use 1 for selected, 0 for not selected in the ROW line. Example of one complete row's block:\n"
+        "selected, 1 empty) — this is a normal 'garderad rad' (system bet row), not an error. Then also state "
+        "whether the small 'M' badge is present on this row.\n"
+        "ROW <n> | <home team> - <away team> | <kickoff text> | 1=<0 or 1> X=<0 or 1> 2=<0 or 1> M=<0 or 1>\n\n"
+        "Use 1 for selected/present, 0 for not, in the ROW line. Example of two complete row blocks:\n"
         "Analysis: The 1 pill is white with a gray border — not selected. The X pill is solid dark navy with "
-        "white text — selected. The 2 pill is also solid dark navy with white text — selected.\n"
-        "ROW 7 | Cardiff - Sheffield U | Idag 16:00 | 1=0 X=1 2=1\n\n"
+        "white text — selected. The 2 pill is also solid dark navy with white text — selected. No 'M' badge is "
+        "visible on this row.\n"
+        "ROW 7 | Cardiff - Sheffield U | Idag 16:00 | 1=0 X=1 2=1 M=0\n\n"
+        "Analysis: The 1 pill is solid dark navy with white text — selected. The X and 2 pills are white with a "
+        "gray border — not selected. A small square 'M' badge is visible between the kickoff time and the pills.\n"
+        "ROW 11 | Sheffield U - Norwich | 17:00 | 1=1 X=0 2=0 M=1\n\n"
         f"Begin now with SYSTEM_TYPE, then Row 1's analysis and ROW line, then Row 2's, continuing strictly in "
         f"order through every row visible on the coupon (expect {expected_rows} rows total). Do not skip any row."
     )
 
 ROW_LINE_RE = re.compile(
-    r'ROW\s+(\d+)\s*\|\s*(.+?)\s*-\s*(.+?)\s*\|\s*(.*?)\s*\|\s*1=([01])\s+X=([01])\s+2=([01])',
+    r'ROW\s+(\d+)\s*\|\s*(.+?)\s*-\s*(.+?)\s*\|\s*(.*?)\s*\|\s*1=([01])\s+X=([01])\s+2=([01])(?:\s+M=([01]))?',
     re.IGNORECASE,
 )
 SYSTEM_TYPE_RE = re.compile(r'SYSTEM_TYPE:\s*(.+)', re.IGNORECASE)
@@ -413,7 +422,7 @@ def parse_decode_analysis(text):
     involved, so nothing can get lost in an LLM 're-transcribing itself' step."""
     rows = []
     for m in ROW_LINE_RE.finditer(text):
-        row_num, home, away, kickoff, one, x, two = m.groups()
+        row_num, home, away, kickoff, one, x, two, marked = m.groups()
         picks = []
         if one == '1': picks.append('1')
         if x == '1': picks.append('X')
@@ -425,6 +434,7 @@ def parse_decode_analysis(text):
             'kickoff_time': kickoff.strip(),
             'picks': picks or ['1'],
             'zero_picks_read': not picks,
+            'marked': marked == '1',
         })
     sys_match = SYSTEM_TYPE_RE.search(text)
     system_type = sys_match.group(1).strip() if sys_match else 'Enkelrad'

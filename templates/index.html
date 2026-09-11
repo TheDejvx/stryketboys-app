@@ -167,6 +167,15 @@ body {
 /* Wrong tip: no red fill on the whole row — just a box around whichever pill is the actual outcome. */
 .pick-pill.outcome { border: 2.5px solid var(--loss); }
 
+.m-badge {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 16px; height: 16px; border-radius: 4px; font-size: 10px; font-weight: 800;
+  border: 1.5px solid var(--text); color: var(--text); background: var(--white);
+  vertical-align: middle; user-select: none;
+}
+.m-badge.editable { cursor: pointer; opacity: .4; }
+.m-badge.editable.active { opacity: 1; background: var(--primary); border-color: var(--primary); color: var(--white); }
+
 .match-badge { font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 10px; white-space: nowrap; }
 .badge-live { background: var(--live-bg); color: var(--live); }
 .badge-correct { background: var(--win-bg); color: var(--win); }
@@ -1025,7 +1034,7 @@ function buildWeekRows(week) {
     return `<div class="match-row${tipHit ? ' tip-correct' : ''}${tipMiss ? ' tip-wrong' : ''}">
       <div class="match-row-left">
         <div class="match-row-num">#${row.row_num}</div>
-        <div class="match-teams">${esc(row.home)} - ${esc(row.away)}</div>
+        <div class="match-teams">${esc(row.home)} - ${esc(row.away)}${row.marked ? ' <span class="m-badge" title="M-markering">M</span>' : ''}</div>
         <div class="match-meta">${esc(row.kickoff_time || '')}${oddsText}</div>
       </div>
       <div class="match-row-right">
@@ -1210,7 +1219,10 @@ function decodePreviewHtml() {
         <input value="${esc(row.away)}" oninput="updatePreviewField(${idx},'away',this.value)" placeholder="Bortalag">
         ${row.low_confidence ? '<span class="low-conf-flag">⚠ Matcha inte mot spelschemat – kontrollera</span>' : ''}
       </div>
-      <div class="match-pills">${pillsHtml}</div>
+      <div class="match-pills">
+        ${pillsHtml}
+        <span class="m-badge editable${row.marked ? ' active' : ''}" onclick="togglePreviewMarked(${idx})" title="M-markering">M</span>
+      </div>
     </div>`;
   }).join('');
 
@@ -1247,6 +1259,7 @@ function togglePreviewPick(idx, sign) {
   render();
 }
 function updatePreviewField(idx, field, value) { decodePreview.rows[idx][field] = value; }
+function togglePreviewMarked(idx) { decodePreview.rows[idx].marked = !decodePreview.rows[idx].marked; render(); }
 function releaseDecodePreviewImage() {
   if (decodePreview && decodePreview.imageUrl) URL.revokeObjectURL(decodePreview.imageUrl);
 }
@@ -1266,6 +1279,7 @@ async function confirmDecodePreview() {
     rows: decodePreview.rows.map(r => ({
       row_num: r.row_num, home: r.home, away: r.away, kickoff_time: r.kickoff_time,
       match_id: r.match_id, match_start: r.match_start, picks: r.picks, settled_result: null,
+      marked: !!r.marked,
     })),
   };
   try {
