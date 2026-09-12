@@ -565,7 +565,10 @@ def fetch_result(product, draw_number):
     return _result_cache[product][draw_number]
 
 LIVE_POLL_SECONDS = 20
-IDLE_POLL_SECONDS = 90
+# Backed off from 90s — no match is actually live yet (or all are done), and the manual 🔄 button
+# already covers "I want fresh data right now", so there's no need to hit Svenska Spel's API this
+# often just to sit idle before kickoff (or after full-time, waiting on result finalization).
+IDLE_POLL_SECONDS = 600
 
 def has_live_match(draw):
     """Best-effort: a match counts as 'live' if it has kicked off but neither its
