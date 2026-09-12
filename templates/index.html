@@ -736,6 +736,12 @@ function updateAuthUI() {
 
 // ── STATE ──
 const PRODUCTS = ['stryktipset', 'europatipset'];
+// The group only actually plays Stryktipset — Europatipset support stays fully functional (an
+// uploaded Europatipset coupon still shows normally in Kupong/Historik) in case they ever want
+// it, but Svenska Spel always has *some* Europatipset draw open, so the "Ladda upp kupong" nudge
+// card (see renderKupong()) shouldn't list it every week for a coupon nobody intends to upload.
+// Mirrors REMINDER_PRODUCTS in app.py, which scopes the equivalent backend push reminders.
+const UPLOAD_NUDGE_PRODUCTS = ['stryktipset'];
 const PRODUCT_LABELS = { stryktipset: '⚽ Stryktipset', europatipset: '🇪🇺 Europatipset' };
 let selectedProduct = 'stryktipset';
 let state = { users: [], weeks: [] };
@@ -1281,7 +1287,7 @@ function renderKupong() {
       activeWeeks.forEach(({ week, built }) => sections.push(weekCardHtml(week, built, { showRefresh: true, showDelete: true })));
     } else if (draw) {
       const hasWeekForCurrentDraw = (state.weeks || []).some(w => (w.product || 'stryktipset') === product && w.draw_number === draw.draw_number);
-      if (!hasWeekForCurrentDraw) missing.push({ product, draw });
+      if (!hasWeekForCurrentDraw && UPLOAD_NUDGE_PRODUCTS.includes(product)) missing.push({ product, draw });
     } else {
       sections.push(`<div class="card"><div class="loading-row">Hämtar ${PRODUCT_LABELS[product]}...</div></div>`);
     }
