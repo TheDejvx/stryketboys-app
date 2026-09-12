@@ -743,6 +743,23 @@ const PRODUCTS = ['stryktipset', 'europatipset'];
 // Mirrors REMINDER_PRODUCTS in app.py, which scopes the equivalent backend push reminders.
 const UPLOAD_NUDGE_PRODUCTS = ['stryktipset'];
 const PRODUCT_LABELS = { stryktipset: '⚽ Stryktipset', europatipset: '🇪🇺 Europatipset' };
+
+// Human date instead of the Svenska Spel draw number ("v4970") in headings and notifications —
+// the group finds a date immediately meaningful and the internal draw number not. weekDateLabel
+// derives it from the earliest known kickoff among a week's own rows (falls back to the draw
+// number if no row has a usable match_start, e.g. every row's fuzzy-match failed at decode time).
+// drawDateLabel is for a not-yet-uploaded draw (no rows exist yet) — uses reg_close_time instead,
+// which for Stryktipset falls on the same day as the matches.
+function weekDateLabel(week) {
+  const starts = (week.rows || []).map(r => r.match_start).filter(Boolean).map(s => new Date(s));
+  if (!starts.length) return `v${week.draw_number ?? '–'}`;
+  const earliest = new Date(Math.min(...starts));
+  return earliest.toLocaleDateString('sv-SE', { weekday: 'short', day: 'numeric', month: 'short' });
+}
+function drawDateLabel(draw) {
+  if (!draw || !draw.reg_close_time) return `omgång ${draw && draw.draw_number != null ? draw.draw_number : '–'}`;
+  return new Date(draw.reg_close_time).toLocaleDateString('sv-SE', { weekday: 'short', day: 'numeric', month: 'short' });
+}
 let selectedProduct = 'stryktipset';
 let state = { users: [], weeks: [] };
 // Keyed by draw_number, not just product — a product can have an older, not-yet-fully-settled
@@ -1058,7 +1075,7 @@ function uploadPromptHtml(missing) {
   const authed = checkAuth();
   const suggestion = nextUploader();
   const pendingLines = missing.map(({ product, draw }) =>
-    `<div>${PRODUCT_LABELS[product]}: omgång ${draw.draw_number ?? '–'}</div>`
+    `<div>${PRODUCT_LABELS[product]}: ${drawDateLabel(draw)}</div>`
   ).join('');
   return `<div class="card">
     <div class="card-header"><h2>📸 Ladda upp kupong</h2></div>
@@ -1238,7 +1255,7 @@ function weekCardHtml(week, built, opts) {
   const product = week.product || 'stryktipset';
   const draw = drawFor(product, week.draw_number);
   const total = (week.rows || []).length;
-  const title = `🎟️ ${PRODUCT_LABELS[product] || product} v${week.draw_number ?? '–'} – ${esc(week.uploaded_by || '')} · ${built.correct}/${total} rätt`;
+  const title = `🎟️ ${PRODUCT_LABELS[product] || product} ${weekDateLabel(week)} – ${esc(week.uploaded_by || '')} · ${built.correct}/${total} rätt`;
   const tallyHtml = `
     <div class="summary-bar">
       <div class="summary-item"><div class="label">Rätt</div><div class="value positive">${built.correct}</div></div>
@@ -1519,7 +1536,7 @@ function renderHistory() {
     return `<div class="week-card">
       <div class="week-card-header" onclick="toggleWeekDetail('${esc(w.id)}')">
         <div>
-          <div class="week-card-title">${productLabel} · Omgång ${w.draw_number ?? '–'}</div>
+          <div class="week-card-title">${productLabel} · ${weekDateLabel(w)}</div>
           <div class="week-card-sub">${esc(w.uploaded_by || '')} · ${esc(w.system_type || 'Enkelrad')}</div>
         </div>
         <div style="display:flex;align-items:center;gap:10px">
@@ -1596,7 +1613,7 @@ function renderRecentResults() {
     const tallyStr = total ? `${correct}/${rowCount} rätt${settled ? '' : ' (pågår)'}` : 'Ej avgjord';
     const productLabel = PRODUCT_LABELS[w.product || 'stryktipset'] || w.product;
     return `<div class="schedule-row">
-      <span class="schedule-name">${esc(w.uploaded_by || '–')} <span style="color:var(--muted);font-weight:400">· ${productLabel} v${w.draw_number ?? '–'}</span></span>
+      <span class="schedule-name">${esc(w.uploaded_by || '–')} <span style="color:var(--muted);font-weight:400">· ${productLabel} ${weekDateLabel(w)}</span></span>
       <span class="schedule-date">${esc(tallyStr)}</span>
     </div>`;
   }).join('');
@@ -1636,7 +1653,7 @@ function renderPerfectWeeks() {
     const productLabel = PRODUCT_LABELS[w.product || 'stryktipset'] || w.product;
     const dateStr = w.created_at ? new Date(w.created_at).toLocaleDateString('sv-SE', { day: 'numeric', month: 'short', year: 'numeric' }) : '';
     return `<div class="schedule-row">
-      <span class="schedule-name">🎉 ${esc(w.uploaded_by || '–')} <span style="color:var(--muted);font-weight:400">· ${productLabel} v${w.draw_number ?? '–'}</span></span>
+      <span class="schedule-name">🎉 ${esc(w.uploaded_by || '–')} <span style="color:var(--muted);font-weight:400">· ${productLabel} ${weekDateLabel(w)}</span></span>
       <span class="schedule-date">${total}/${total} · ${esc(dateStr)}</span>
     </div>`;
   }).join('');
