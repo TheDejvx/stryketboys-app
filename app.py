@@ -796,6 +796,24 @@ def save_coupon():
 def vapid_public_key():
     return jsonify({'key': VAPID_PUBLIC_KEY})
 
+@app.route('/api/push/test', methods=['POST'])
+def push_test():
+    """Manual one-off test send — same broadcast_push() path as real notifications, but scoped to
+    a single user (`username` in the payload) rather than the whole group. Used to confirm actual
+    delivery end-to-end after the service-worker-scope bug fix (see CLAUDE.md)."""
+    payload = request.json or {}
+    username = payload.get('username')
+    data = load_data()
+    user = find_user(data, username)
+    if not user:
+        return jsonify({'status': 'error', 'message': 'Unknown user'}), 404
+    if broadcast_push({'users': [user]}, title='Testnotis', body='Om du ser detta funkar push-notiser! 🎉', tag='test-push'):
+        for u in data.get('users', []):
+            if u.get('username') == user.get('username'):
+                u['push_subscriptions'] = user.get('push_subscriptions')
+        save_data(data)
+    return jsonify({'status': 'ok'})
+
 @app.route('/api/push/debug', methods=['POST'])
 def push_debug():
     """Diagnostic-only sink for subscribeToPush()'s client-side stages — added specifically
