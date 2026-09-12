@@ -784,6 +784,17 @@ def save_coupon():
 def vapid_public_key():
     return jsonify({'key': VAPID_PUBLIC_KEY})
 
+@app.route('/api/push/debug', methods=['POST'])
+def push_debug():
+    """Diagnostic-only sink for subscribeToPush()'s client-side stages — added specifically
+    because every user showed 0 stored push_subscriptions with no way to tell why (mobile
+    Safari's console isn't practically reachable without a Mac + USB). Just logs; nothing
+    persisted, nothing this can break."""
+    payload = request.json or {}
+    print(f"push_debug: user={payload.get('username')} stage={payload.get('stage')} "
+          f"detail={payload.get('detail')!r} ua={payload.get('ua')!r}")
+    return jsonify({'status': 'ok'})
+
 @app.route('/api/push/subscribe', methods=['POST'])
 def push_subscribe():
     payload = request.json or {}
