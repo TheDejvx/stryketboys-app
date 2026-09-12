@@ -463,6 +463,13 @@ body {
           <div class="loading-row">Laddar...</div>
         </div>
       </div>
+      <div class="card">
+        <div class="card-header"><h2>⚽ Målnotiser</h2></div>
+        <div style="font-size:11px;color:var(--muted);padding:0 16px 8px">Vem som får en extra push vid varje mål i en aktiv kupong (match, målskytt, minut, resultat och vad man bettat)</div>
+        <div id="admin-goal-notif-body">
+          <div class="loading-row">Laddar...</div>
+        </div>
+      </div>
     </div>
 
   </div>
@@ -1680,6 +1687,7 @@ async function renderAdminOverview() {
   const session = getSession();
   const body = document.getElementById('admin-overview-body');
   const targetsEl = document.getElementById('admin-push-targets');
+  const goalNotifEl = document.getElementById('admin-goal-notif-body');
   if (!session || !body || !targetsEl) return;
   try {
     const r = await fetch(`/api/admin/overview?username=${encodeURIComponent(session.username)}`);
@@ -1687,6 +1695,7 @@ async function renderAdminOverview() {
     if (data.status !== 'ok') {
       body.innerHTML = `<div class="no-data"><div class="icon">🔒</div><div>Ingen åtkomst.</div></div>`;
       targetsEl.innerHTML = '';
+      if (goalNotifEl) goalNotifEl.innerHTML = '';
       return;
     }
     body.innerHTML = data.users.map(u => {
@@ -1704,8 +1713,33 @@ async function renderAdminOverview() {
       data.users.map(u => `<label class="target-chip" data-value="${esc(u.username)}">
         <input type="checkbox" value="${esc(u.username)}" onchange="onAdminTargetToggle(this)"> ${esc(u.display_name)}${u.push_enabled ? '' : ' (ingen push)'}
       </label>`).join('');
+
+    if (goalNotifEl) {
+      goalNotifEl.innerHTML = data.users.map(u => `<label class="schedule-row" style="cursor:pointer">
+        <span class="schedule-name">${esc(u.display_name)}</span>
+        <span class="schedule-date"><input type="checkbox" ${u.goal_notifications_enabled ? 'checked' : ''} onchange="toggleGoalNotifications('${esc(u.username)}', this)"></span>
+      </label>`).join('');
+    }
   } catch (e) {
     body.innerHTML = `<div class="no-data"><div class="icon">⚠️</div><div>Kunde inte hämta admin-data.</div></div>`;
+  }
+}
+async function toggleGoalNotifications(targetUsername, checkbox) {
+  const session = getSession();
+  if (!session) return;
+  checkbox.disabled = true;
+  try {
+    const r = await fetch('/api/admin/goal-notifications', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: session.username, target_username: targetUsername, enabled: checkbox.checked }),
+    });
+    const data = await r.json();
+    if (data.status !== 'ok') { checkbox.checked = !checkbox.checked; alert('Kunde inte spara: ' + (data.message || 'okänt fel')); }
+  } catch (e) {
+    checkbox.checked = !checkbox.checked;
+    alert('Kunde inte spara.');
+  } finally {
+    checkbox.disabled = false;
   }
 }
 // "Alla" and individual users are mutually exclusive selections — picking one clears the other,
