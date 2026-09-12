@@ -74,6 +74,14 @@ def load_data():
         for u in data.get('users', []):
             if u.get('username') == 'david':
                 u['is_admin'] = True
+    # Same self-healing idea, but per-user rather than a single group-wide flag — everyone needs
+    # their own on/off value for goal notifications (see "Goal notifications" in CLAUDE.md).
+    # Defaults to on for david, off for everyone else, but only the first time a user record is
+    # seen without this field, so it never fights an admin's later change (including turning it
+    # off for david himself).
+    for u in data.get('users', []):
+        if 'goal_notifications_enabled' not in u:
+            u['goal_notifications_enabled'] = (u.get('username') == 'david')
     return data
 
 def save_data(data):
@@ -597,6 +605,141 @@ def _looks_finished(ev):
     st = (ev.get('status') or '').lower()
     return any(k in s for k in ('end', 'finish', 'final')) or any(k in st for k in ('avslutad', 'slut'))
 
+# Python ports of isLive()/isInterrupted()/currentScore()/deriveResultSign()/estimateMinute() in
+# templates/index.html — goal detection (see check_goal_notifications below) needs the exact same
+# "is this actually live right now" and "what's the live score" logic the frontend already uses,
+# not a second, subtly different reimplementation that could disagree with what's shown on-screen.
+def _is_live(ev):
+    if not ev or _looks_finished(ev):
+        return False
+    match_start = ev.get('match_start')
+    if match_start:
+        try:
+            if datetime.fromisoformat(match_start.replace('Z', '+00:00')) > datetime.now(timezone.utc):
+                return False
+        except Exception:
+            pass
+    s = (ev.get('sport_event_status') or '').lower()
+    st = (ev.get('status') or '').lower()
+    if s == 'notstarted' or 'inte startat' in st:
+        return False
+    return bool(re.search(r'live|inprogress|\bstarted\b|half|interrupted|suspended|abandoned', s)) or \
+        bool(re.search(r'pågår|paus|avbruten', st))
+
+def _is_interrupted(ev):
+    s = (ev.get('sport_event_status') or '').lower()
+    st = (ev.get('status') or '').lower()
+    return bool(re.search(r'interrupted|suspended|abandoned', s)) or 'avbruten' in st
+
+def _current_score(ev):
+    res = ev.get('result') if ev else None
+    if not res or not isinstance(res, list):
+        return None
+    entry = next((r for r in res if r.get('sportEventResultType') == 'Current'), res[0] if res else None)
+    if not entry or entry.get('home') is None or entry.get('away') is None:
+        return None
+    try:
+        return int(entry['home']), int(entry['away'])
+    except (TypeError, ValueError):
+        return None
+
+def _derive_result_sign(ev):
+    res = ev.get('result') if ev else None
+    if not res or not isinstance(res, list):
+        return None
+    entry = (next((r for r in res if r.get('sportEventResultType') == 'Current'), None)
+             or next((r for r in res if r.get('sportEventResultType') == 'Fulltime'), None)
+             or (res[-1] if res else None))
+    if not entry or entry.get('home') is None or entry.get('away') is None:
+        return None
+    try:
+        h, a = int(entry['home']), int(entry['away'])
+    except (TypeError, ValueError):
+        return None
+    if h > a:
+        return '1'
+    if h < a:
+        return '2'
+    return 'X'
+
+def _estimate_minute(ev):
+    status = (ev.get('sport_event_status') or '').lower()
+    if status == 'halftime':
+        return 'Paus'
+    if status not in ('firsthalf', 'secondhalf'):
+        return None
+    period_start_raw = ev.get('match_start') if status == 'firsthalf' else ev.get('status_time')
+    if not period_start_raw:
+        return None
+    try:
+        period_start = datetime.fromisoformat(period_start_raw.replace('Z', '+00:00'))
+    except Exception:
+        return None
+    base_minute = 0 if status == 'firsthalf' else 45
+    cap = 45 if status == 'firsthalf' else 90
+    elapsed_minutes = int((datetime.now(timezone.utc) - period_start).total_seconds() // 60)
+    minute = min(cap, base_minute + max(0, elapsed_minutes))
+    return f"{minute}'"
+
+# match_id -> (home, away) — in-memory only, not persisted. A restart mid-match just means the
+# next poll re-seeds the baseline without firing (see check_goal_notifications), a one-time,
+# acceptable miss rather than something worth the complexity of persisting.
+_last_known_score = {}
+
+def check_goal_notifications(data):
+    """Detects a score change since the last poll for any row in an active (not-yet-fully-
+    settled) week, and pushes a goal alert to whoever has goal_notifications_enabled — naming the
+    match, who scored, the live minute, the resulting 1X2 sign, and what we ourselves bet on that
+    row, so the recipient immediately knows if it's good or bad news. Returns True if any stale
+    subscription got dropped along the way, mirroring the other checks — the caller should
+    save_data(data) if so."""
+    changed = False
+    recipients = {'users': [u for u in data.get('users', []) if u.get('goal_notifications_enabled')]}
+    if not recipients['users']:
+        return False
+    for week in data.get('weeks', []):
+        rows = week.get('rows') or []
+        if not rows or all(r.get('settled_result') for r in rows):
+            continue  # already fully settled — nothing live left to watch
+        product = week.get('product', 'stryktipset')
+        draw = _draw_cache.get(product, {}).get(week.get('draw_number'))
+        if not draw:
+            continue
+        events_by_id = {ev['match_id']: ev for ev in draw.get('events', []) if ev.get('match_id')}
+        for row in rows:
+            match_id = row.get('match_id')
+            if not match_id:
+                continue
+            ev = events_by_id.get(match_id)
+            if not ev or not _is_live(ev) or _is_interrupted(ev):
+                continue
+            score = _current_score(ev)
+            if not score:
+                continue
+            prev = _last_known_score.get(match_id)
+            _last_known_score[match_id] = score
+            if prev is None or score == prev:
+                continue  # first sighting (seed baseline, don't fire retroactively) or unchanged
+            scorers = []
+            if score[0] > prev[0]:
+                scorers.append(row.get('home') or ev.get('home') or 'Hemmalaget')
+            if score[1] > prev[1]:
+                scorers.append(row.get('away') or ev.get('away') or 'Bortalaget')
+            if not scorers:
+                continue  # a total went down (e.g. a VAR-overturned goal) — not a goal to announce
+            sign = _derive_result_sign(ev) or '?'
+            minute = _estimate_minute(ev) or ''
+            picks = ', '.join(row.get('picks') or [])
+            if broadcast_push(
+                recipients,
+                title=f'⚽ Mål för {" och ".join(scorers)}!',
+                body=f'{row.get("home")} - {row.get("away")}: {score[0]}-{score[1]} ({sign})'
+                     f'{" · " + minute if minute else ""} — Ni har bettat: {picks}',
+                tag=f'goal-{match_id}-{score[0]}-{score[1]}',
+            ):
+                changed = True
+    return changed
+
 def _active_draw_numbers(product):
     """Draw numbers for this product's not-yet-fully-settled weeks — kept fresh independently of
     whatever the 'current' open-for-betting draw is. Root cause of the Wednesday-coupon-frozen
@@ -645,6 +788,8 @@ def background_poller():
             if check_settlement_notifications(data):
                 notif_changed = True
             if check_upload_reminder_notifications(data):
+                notif_changed = True
+            if check_goal_notifications(data):
                 notif_changed = True
             if notif_changed:
                 save_data(data)
@@ -946,8 +1091,25 @@ def admin_overview():
         'last_login': u.get('last_login'),
         'push_enabled': bool(u.get('push_subscriptions')),
         'push_subscription_count': len(u.get('push_subscriptions') or []),
+        'goal_notifications_enabled': bool(u.get('goal_notifications_enabled')),
     } for u in data.get('users', [])]
     return jsonify({'status': 'ok', 'users': users})
+
+@app.route('/api/admin/goal-notifications', methods=['POST'])
+def admin_goal_notifications():
+    """Per-user toggle, not a bulk targets list like push-broadcast — this is managing one
+    person's standing preference, not composing a one-off message to a chosen audience, so a
+    simple one-username-at-a-time call maps directly onto a checkbox list in the admin UI."""
+    payload = request.json or {}
+    requester, data = _require_admin(payload.get('username'))
+    if not requester:
+        return jsonify({'status': 'error', 'message': 'Forbidden'}), 403
+    target = find_user(data, payload.get('target_username'))
+    if not target:
+        return jsonify({'status': 'error', 'message': 'Unknown user'}), 404
+    target['goal_notifications_enabled'] = bool(payload.get('enabled'))
+    save_data(data)
+    return jsonify({'status': 'ok'})
 
 @app.route('/api/admin/push-broadcast', methods=['POST'])
 def admin_push_broadcast():
