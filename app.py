@@ -155,6 +155,34 @@ def find_user(data, username):
             return u
     return None
 
+# Human date instead of the Svenska Spel draw number ("v4970") in push notification text — the
+# group finds a date immediately meaningful and the internal draw number not. Hand-rolled rather
+# than relying on the OS locale (not guaranteed available in the Railway container), matching the
+# frontend's own toLocaleDateString('sv-SE', {weekday:'short', day:'numeric', month:'short'})
+# calls so the wording lines up between push text and the app itself.
+_SV_WEEKDAYS = ['mån', 'tis', 'ons', 'tors', 'fre', 'lör', 'sön']
+_SV_MONTHS = ['jan', 'feb', 'mar', 'apr', 'maj', 'jun', 'jul', 'aug', 'sep', 'okt', 'nov', 'dec']
+
+def format_draw_date(dt):
+    return f'{_SV_WEEKDAYS[dt.weekday()]} {dt.day} {_SV_MONTHS[dt.month - 1]}'
+
+def week_date_label(rows, draw_number):
+    """Earliest known kickoff among a week's rows, formatted for push text — falls back to the
+    'v{draw_number}' label if no row has a usable match_start (e.g. every row's fuzzy-match
+    failed at decode time), so the notification text never comes out broken."""
+    starts = []
+    for r in rows or []:
+        s = r.get('match_start')
+        if not s:
+            continue
+        try:
+            starts.append(datetime.fromisoformat(s.replace('Z', '+00:00')))
+        except Exception:
+            continue
+    if not starts:
+        return f'v{draw_number}'
+    return format_draw_date(min(starts))
+
 def broadcast_push(data, title, body, tag=None, exclude_username=None):
     """Send a Web Push notification to every user with at least one stored subscription.
     Mutates data['users'][*]['push_subscriptions'] in place to drop subscriptions the push
@@ -222,7 +250,7 @@ def check_first_match_notifications(data):
             broadcast_push(
                 data,
                 title='🔥 Nu jävlar kör vi!',
-                body=f'{PRODUCT_LABELS.get(product, product)} v{week.get("draw_number")} har dragit igång — {week.get("uploaded_by") or "Någons"}s kupong sätts på prov!',
+                body=f'{PRODUCT_LABELS.get(product, product)} {format_draw_date(earliest)} har dragit igång — {week.get("uploaded_by") or "Någons"}s kupong sätts på prov!',
                 tag=f'first-match-{week["id"]}',
             )
     return changed
@@ -255,7 +283,7 @@ def check_settlement_notifications(data):
             broadcast_push(
                 data,
                 title='Kupongen är avgjord',
-                body=f'{PRODUCT_LABELS.get(product, product)} v{week.get("draw_number")} är klar — dags att kolla resultatet!',
+                body=f'{PRODUCT_LABELS.get(product, product)} {week_date_label(rows, week.get("draw_number"))} är klar — dags att kolla resultatet!',
                 tag=f'settled-{week["id"]}',
             )
     return changed
@@ -305,6 +333,7 @@ def check_upload_reminder_notifications(data):
         hours_left = (close_time - now).total_seconds() / 3600
         key = f'{product}-{draw_number}'
         tiers_sent = sent.setdefault(key, [])
+        date_label = format_draw_date(close_time)
 
         if hours_left <= 2 and '2h' not in tiers_sent:
             tiers_sent.append('2h')
@@ -312,7 +341,7 @@ def check_upload_reminder_notifications(data):
             broadcast_push(
                 {'users': [user]},
                 title='⏰ 2 timmar kvar!',
-                body=f'Du är på tur att ladda upp {PRODUCT_LABELS.get(product, product)} v{draw_number} — glöm inte kupongen!',
+                body=f'Du är på tur att ladda upp {PRODUCT_LABELS.get(product, product)} {date_label} — glöm inte kupongen!',
                 tag=f'reminder-2h-{key}',
             )
         if hours_left <= 1 and '1h' not in tiers_sent:
@@ -321,7 +350,7 @@ def check_upload_reminder_notifications(data):
             broadcast_push(
                 {'users': [user]},
                 title='🚨 SISTA CHANSEN — 1 timme kvar!',
-                body=f'{PRODUCT_LABELS.get(product, product)} v{draw_number} stänger snart och ingen kupong är uppladdad än. Ladda upp NU!',
+                body=f'{PRODUCT_LABELS.get(product, product)} {date_label} stänger snart och ingen kupong är uppladdad än. Ladda upp NU!',
                 tag=f'reminder-1h-{key}',
             )
     return changed
@@ -860,7 +889,7 @@ def save_coupon():
         broadcast_push(
             data,
             title='Ny kupong uppladdad',
-            body=f'{payload.get("uploaded_by") or "Någon"} laddade upp {PRODUCT_LABELS.get(product, product)} v{week.get("draw_number")}',
+            body=f'{payload.get("uploaded_by") or "Någon"} laddade upp {PRODUCT_LABELS.get(product, product)} {week_date_label(week.get("rows"), week.get("draw_number"))}',
             tag=f'new-coupon-{week_id}',
             exclude_username=payload.get('uploaded_by_username'),
         )
