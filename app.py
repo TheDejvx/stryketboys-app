@@ -221,8 +221,8 @@ def check_first_match_notifications(data):
             product = week.get('product', 'stryktipset')
             broadcast_push(
                 data,
-                title='Första matchen har startat',
-                body=f'{PRODUCT_LABELS.get(product, product)} v{week.get("draw_number")} har dragit igång',
+                title='🔥 Nu jävlar kör vi!',
+                body=f'{PRODUCT_LABELS.get(product, product)} v{week.get("draw_number")} har dragit igång — {week.get("uploaded_by") or "Någons"}s kupong sätts på prov!',
                 tag=f'first-match-{week["id"]}',
             )
     return changed
@@ -257,6 +257,65 @@ def check_settlement_notifications(data):
                 title='Kupongen är avgjord',
                 body=f'{PRODUCT_LABELS.get(product, product)} v{week.get("draw_number")} är klar — dags att kolla resultatet!',
                 tag=f'settled-{week["id"]}',
+            )
+    return changed
+
+def check_upload_reminder_notifications(data):
+    """Reminds whoever's currently at the front of the upload rotation to upload the coupon for
+    a product's current draw — twice: a nudge at 2h-before-close, a more urgent one at 1h-before-
+    close, each sent only if nobody's uploaded a coupon for that exact draw yet by the time the
+    threshold is crossed (checking again at send-time, not just once — an upload between the two
+    thresholds correctly cancels the second one). This only ever concerns the single currently-
+    open draw per product, so 'whose turn' is simply whoever uploader_rotation currently points
+    at — no need to project the schedule forward. One-shot per (product, draw_number, tier) via
+    data['upload_reminders_sent'], mirroring the week-level *_notified flags used elsewhere."""
+    changed = False
+    now = datetime.now(timezone.utc)
+    rotation = data.get('uploader_rotation') or []
+    if not rotation:
+        return False
+    idx = data.get('uploader_rotation_index', 0) % len(rotation)
+    user = find_user(data, rotation[idx])
+    if not user:
+        return False
+    sent = data.setdefault('upload_reminders_sent', {})
+
+    for product in PRODUCTS:
+        draw = current_draw(product)
+        if not draw or not draw.get('draw_number') or not draw.get('reg_close_time'):
+            continue
+        draw_number = draw['draw_number']
+        has_coupon = any(
+            w.get('product', 'stryktipset') == product and w.get('draw_number') == draw_number
+            for w in data.get('weeks', [])
+        )
+        if has_coupon:
+            continue
+        try:
+            close_time = datetime.fromisoformat(draw['reg_close_time'].replace('Z', '+00:00'))
+        except Exception:
+            continue
+        hours_left = (close_time - now).total_seconds() / 3600
+        key = f'{product}-{draw_number}'
+        tiers_sent = sent.setdefault(key, [])
+
+        if hours_left <= 2 and '2h' not in tiers_sent:
+            tiers_sent.append('2h')
+            changed = True
+            broadcast_push(
+                {'users': [user]},
+                title='⏰ 2 timmar kvar!',
+                body=f'Du är på tur att ladda upp {PRODUCT_LABELS.get(product, product)} v{draw_number} — glöm inte kupongen!',
+                tag=f'reminder-2h-{key}',
+            )
+        if hours_left <= 1 and '1h' not in tiers_sent:
+            tiers_sent.append('1h')
+            changed = True
+            broadcast_push(
+                {'users': [user]},
+                title='🚨 SISTA CHANSEN — 1 timme kvar!',
+                body=f'{PRODUCT_LABELS.get(product, product)} v{draw_number} stänger snart och ingen kupong är uppladdad än. Ladda upp NU!',
+                tag=f'reminder-1h-{key}',
             )
     return changed
 
@@ -545,6 +604,8 @@ def background_poller():
             data = load_data()
             notif_changed = check_first_match_notifications(data)
             if check_settlement_notifications(data):
+                notif_changed = True
+            if check_upload_reminder_notifications(data):
                 notif_changed = True
             if notif_changed:
                 save_data(data)
