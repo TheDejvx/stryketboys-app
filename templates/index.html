@@ -472,7 +472,10 @@ body {
 
 <script>
 // ── AUTH (per-user login) ──
-const SESSION_KEY = 'stryk_session';
+// Bumped v1 -> v2 to force everyone to log back in when push notifications shipped (see below) —
+// existing v1 sessions in localStorage are simply never read again under the new key, no server
+// coordination needed. Only bump this again for a deliberate "log everyone out" moment.
+const SESSION_KEY = 'stryk_session_v2';
 const SESSION_TTL = 30 * 24 * 60 * 60 * 1000; // 30 days
 let pendingAction = null;
 let loginStep = 'login'; // 'login' | 'change'
@@ -556,6 +559,7 @@ async function submitLogin() {
       updateAuthUI();
       if (pendingAction) { pendingAction(); pendingAction = null; }
       render();
+      subscribeToPush(data.username);
     }
   } catch (e) {
     errEl.textContent = 'Kunde inte logga in. Kontrollera nätverket.';
@@ -578,6 +582,7 @@ async function submitChangePassword() {
     const data = await r.json();
     if (data.status !== 'ok') { errEl.textContent = data.message || 'Kunde inte byta lösenord.'; errEl.style.display = 'block'; return; }
     setSession(pendingSessionInfo.username, pendingSessionInfo.display_name);
+    const loggedInUsername = pendingSessionInfo.username;
     pendingLoginPassword = null;
     pendingSessionInfo = null;
     loginStep = 'login';
@@ -585,6 +590,7 @@ async function submitChangePassword() {
     updateAuthUI();
     if (pendingAction) { pendingAction(); pendingAction = null; }
     render();
+    subscribeToPush(loggedInUsername);
   } catch (e) {
     errEl.textContent = 'Kunde inte byta lösenord. Kontrollera nätverket.';
     errEl.style.display = 'block';
@@ -592,6 +598,42 @@ async function submitChangePassword() {
 }
 
 function logout() { clearSession(); updateAuthUI(); render(); }
+
+// ── PUSH NOTIFICATIONS ──
+// Asked for right after every login (see submitLogin()/submitChangePassword()) so it's tied to
+// "who is this" rather than a generic homepage prompt. Fails silently everywhere it can't work
+// (unsupported browser, permission denied, no service worker yet) — this is a nice-to-have, never
+// something that should block or alarm someone during login.
+function urlBase64ToUint8Array(base64String) {
+  const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const raw = atob(base64);
+  return Uint8Array.from([...raw].map(c => c.charCodeAt(0)));
+}
+async function subscribeToPush(username) {
+  try {
+    if (!('serviceWorker' in navigator) || !('PushManager' in window)) return;
+    const permission = await Notification.requestPermission();
+    if (permission !== 'granted') return;
+    const registration = await navigator.serviceWorker.ready;
+    let subscription = await registration.pushManager.getSubscription();
+    if (!subscription) {
+      const r = await fetch('/api/push/vapid-public-key');
+      const { key } = await r.json();
+      if (!key) return; // VAPID not configured server-side yet
+      subscription = await registration.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(key),
+      });
+    }
+    await fetch('/api/push/subscribe', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, subscription: subscription.toJSON() }),
+    });
+  } catch (e) {
+    console.error('Push subscription failed', e);
+  }
+}
 
 function updateAuthUI() {
   const session = getSession();
@@ -1205,6 +1247,7 @@ async function onCouponFileChosen(input) {
       rows: data.rows || [],
       draw_number: data.draw_number ?? (currentDraw(detectedProduct) ? currentDraw(detectedProduct).draw_number : null),
       uploaded_by: session ? session.display_name : nextUploader(),
+      uploaded_by_username: session ? session.username : null,
       imageUrl: URL.createObjectURL(file),
       imageFile: file,
     };
@@ -1294,6 +1337,7 @@ async function confirmDecodePreview() {
     product: targetProduct,
     draw_number: decodePreview.draw_number,
     uploaded_by: decodePreview.uploaded_by,
+    uploaded_by_username: decodePreview.uploaded_by_username,
     system_type: decodePreview.system_type,
     rows: decodePreview.rows.map(r => ({
       row_num: r.row_num, home: r.home, away: r.away, kickoff_time: r.kickoff_time,
