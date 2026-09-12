@@ -8,6 +8,18 @@ from PIL import Image
 app = Flask(__name__)
 DATA_FILE = os.path.join(os.path.dirname(__file__), 'stryk_data.json')
 
+@app.after_request
+def add_sw_scope_header(response):
+    """A service worker script served from /static/sw.js is, by default, only allowed to control
+    pages under /static/ — the browser refuses a broader scope claim (see the frontend's
+    { scope: '/' } registration) unless the server explicitly grants it via this header. Root
+    cause of push subscriptions hanging forever at serviceWorker.ready: without this, the SW
+    registered "successfully" but could never actually control the app's page at '/', so nothing
+    was ever there for .ready to resolve to."""
+    if request.path == '/static/sw.js':
+        response.headers['Service-Worker-Allowed'] = '/'
+    return response
+
 # Web Push (see "Push notifications" in CLAUDE.md). Both keys come from a one-time-generated
 # VAPID key pair set as Railway env vars — push sending no-ops quietly if they're not set,
 # same pattern as GEMINI_API_KEY/get_gemini().

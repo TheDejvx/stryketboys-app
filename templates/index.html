@@ -1618,7 +1618,14 @@ async function installApp() {
 }
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
-    navigator.serviceWorker.register('/static/sw.js').catch(e => console.error('sw register', e));
+    // Root cause of push subscriptions silently hanging forever (found via subscribeToPush()'s
+    // timeout diagnostics: stuck at 'sw-ready' every time): registering '/static/sw.js' with no
+    // explicit scope defaults the scope to '/static/' — the script's own directory — so it could
+    // never control the actual app page at '/', and navigator.serviceWorker.ready (awaited from
+    // that page) had nothing to ever resolve to. { scope: '/' } fixes the client side; the server
+    // must also send a Service-Worker-Allowed: / header for a script outside the target scope to
+    // be allowed to claim it (see add_sw_scope_header in app.py).
+    navigator.serviceWorker.register('/static/sw.js', { scope: '/' }).catch(e => console.error('sw register', e));
   });
 }
 
