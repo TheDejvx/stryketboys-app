@@ -260,6 +260,13 @@ def check_settlement_notifications(data):
             )
     return changed
 
+# The group currently only actually plays Stryktipset — Europatipset support exists in case they
+# ever want to (decode auto-detection, display, everything else stays fully product-generic) —
+# but Svenska Spel always has *some* Europatipset draw open, so looping the upload reminder over
+# every PRODUCTS entry would nag whoever's on rotation about a coupon nobody intends to upload,
+# every single week. Reminders specifically are scoped to just this list; nothing else is.
+REMINDER_PRODUCTS = ('stryktipset',)
+
 def check_upload_reminder_notifications(data):
     """Reminds whoever's currently at the front of the upload rotation to upload the coupon for
     a product's current draw — twice: a nudge at 2h-before-close, a more urgent one at 1h-before-
@@ -280,7 +287,7 @@ def check_upload_reminder_notifications(data):
         return False
     sent = data.setdefault('upload_reminders_sent', {})
 
-    for product in PRODUCTS:
+    for product in REMINDER_PRODUCTS:
         draw = current_draw(product)
         if not draw or not draw.get('draw_number') or not draw.get('reg_close_time'):
             continue
