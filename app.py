@@ -143,14 +143,17 @@ def broadcast_push(data, title, body, tag=None, exclude_username=None):
     caller should save_data(data) afterward if this returns True. No-ops quietly (returns False)
     if VAPID keys aren't configured, same as decode's get_gemini() pattern for GEMINI_API_KEY."""
     if not (VAPID_PRIVATE_KEY and VAPID_PUBLIC_KEY):
+        print(f'broadcast_push: skipped "{title}" — VAPID_PRIVATE_KEY/VAPID_PUBLIC_KEY not configured')
         return False
     from pywebpush import webpush, WebPushException
     changed = False
+    sent, skipped_no_sub = 0, []
     for user in data.get('users', []):
         if exclude_username and user.get('username', '').lower() == exclude_username.lower():
             continue
         subs = user.get('push_subscriptions') or []
         if not subs:
+            skipped_no_sub.append(user.get('username'))
             continue
         keep = []
         for sub in subs:
@@ -162,15 +165,18 @@ def broadcast_push(data, title, body, tag=None, exclude_username=None):
                     vapid_claims={'sub': VAPID_CLAIM_EMAIL},
                 )
                 keep.append(sub)
+                sent += 1
             except WebPushException as e:
                 status = getattr(e.response, 'status_code', None)
                 if status in (404, 410):
                     changed = True  # expired/unregistered subscription — drop it
+                    print(f'push subscription gone for {user.get("username")} (status {status}) — dropping it')
                     continue
                 print(f'push send failed for {user.get("username")}: {e}')
                 keep.append(sub)  # transient error — keep it, don't discard on a whim
         if len(keep) != len(subs):
             user['push_subscriptions'] = keep
+    print(f'broadcast_push: "{title}" — sent to {sent} subscription(s), no subscription on file for {skipped_no_sub or "none"}')
     return changed
 
 def check_first_match_notifications(data):
@@ -796,6 +802,7 @@ def push_subscribe():
     subs[:] = [s for s in subs if s.get('endpoint') != endpoint]
     subs.append(subscription)
     save_data(data)
+    print(f'push_subscribe: stored subscription for {username} ({len(subs)} total for this user)')
     return jsonify({'status': 'ok'})
 
 @app.route('/api/coupon/image/<week_id>', methods=['GET', 'DELETE'])
