@@ -5,9 +5,15 @@ from difflib import SequenceMatcher
 from werkzeug.security import generate_password_hash, check_password_hash
 from PIL import Image
 
-# Deploy test: confirms pushes from Claude Code on the web reach Railway.
 app = Flask(__name__)
 DATA_FILE = os.path.join(os.path.dirname(__file__), 'stryk_data.json')
+
+# Web Push (see "Push notifications" in CLAUDE.md). Both keys come from a one-time-generated
+# VAPID key pair set as Railway env vars — push sending no-ops quietly if they're not set,
+# same pattern as GEMINI_API_KEY/get_gemini().
+VAPID_PRIVATE_KEY = os.environ.get('VAPID_PRIVATE_KEY')
+VAPID_PUBLIC_KEY = os.environ.get('VAPID_PUBLIC_KEY')
+VAPID_CLAIM_EMAIL = os.environ.get('VAPID_CLAIM_EMAIL', 'mailto:admin@example.com')
 
 _db = None
 
@@ -129,6 +135,105 @@ def find_user(data, username):
         if u.get('username', '').lower() == username:
             return u
     return None
+
+def broadcast_push(data, title, body, tag=None, exclude_username=None):
+    """Send a Web Push notification to every user with at least one stored subscription.
+    Mutates data['users'][*]['push_subscriptions'] in place to drop subscriptions the push
+    service reports as gone (404/410 — the browser unsubscribed, e.g. app uninstalled), so the
+    caller should save_data(data) afterward if this returns True. No-ops quietly (returns False)
+    if VAPID keys aren't configured, same as decode's get_gemini() pattern for GEMINI_API_KEY."""
+    if not (VAPID_PRIVATE_KEY and VAPID_PUBLIC_KEY):
+        return False
+    from pywebpush import webpush, WebPushException
+    changed = False
+    for user in data.get('users', []):
+        if exclude_username and user.get('username', '').lower() == exclude_username.lower():
+            continue
+        subs = user.get('push_subscriptions') or []
+        if not subs:
+            continue
+        keep = []
+        for sub in subs:
+            try:
+                webpush(
+                    subscription_info=sub,
+                    data=json.dumps({'title': title, 'body': body, 'tag': tag}),
+                    vapid_private_key=VAPID_PRIVATE_KEY,
+                    vapid_claims={'sub': VAPID_CLAIM_EMAIL},
+                )
+                keep.append(sub)
+            except WebPushException as e:
+                status = getattr(e.response, 'status_code', None)
+                if status in (404, 410):
+                    changed = True  # expired/unregistered subscription — drop it
+                    continue
+                print(f'push send failed for {user.get("username")}: {e}')
+                keep.append(sub)  # transient error — keep it, don't discard on a whim
+        if len(keep) != len(subs):
+            user['push_subscriptions'] = keep
+    return changed
+
+def check_first_match_notifications(data):
+    """Fires a 'first match started' push exactly once per week, the first time we notice its
+    earliest kickoff has passed. Checked purely against wall-clock time vs each row's already-
+    known match_start — doesn't need live draw data, so it works even if nobody's browser is
+    open to poll anything."""
+    changed = False
+    now = datetime.now(timezone.utc)
+    for week in data.get('weeks', []):
+        if week.get('first_match_notified'):
+            continue
+        starts = [r.get('match_start') for r in (week.get('rows') or []) if r.get('match_start')]
+        if not starts:
+            continue
+        try:
+            earliest = min(datetime.fromisoformat(s.replace('Z', '+00:00')) for s in starts)
+        except Exception:
+            continue
+        if now >= earliest:
+            week['first_match_notified'] = True
+            changed = True
+            product = week.get('product', 'stryktipset')
+            broadcast_push(
+                data,
+                title='Första matchen har startat',
+                body=f'{PRODUCT_LABELS.get(product, product)} v{week.get("draw_number")} har dragit igång',
+                tag=f'first-match-{week["id"]}',
+            )
+    return changed
+
+def check_settlement_notifications(data):
+    """Fires a 'coupon fully settled' push exactly once per week. Checked directly against each
+    week's own cached draw events (sport_event_status), not the frontend-derived settled_result
+    field — that one only gets written when someone's browser is actually open to compute it, so
+    relying on it here would mean this notification might never fire if nobody happens to be
+    looking at the app when the last match ends."""
+    changed = False
+    for week in data.get('weeks', []):
+        if week.get('fully_settled_notified'):
+            continue
+        rows = week.get('rows') or []
+        if not rows:
+            continue
+        product = week.get('product', 'stryktipset')
+        draw = _draw_cache.get(product, {}).get(week.get('draw_number'))
+        if not draw:
+            continue
+        events_by_id = {ev['match_id']: ev for ev in draw.get('events', []) if ev.get('match_id')}
+        all_finished = all(
+            (ev := events_by_id.get(r.get('match_id'))) and _looks_finished(ev)
+            for r in rows
+        )
+        if all_finished:
+            week['fully_settled_notified'] = True
+            changed = True
+            broadcast_push(
+                data,
+                title='Kupongen är avgjord',
+                body=f'{PRODUCT_LABELS.get(product, product)} v{week.get("draw_number")} är klar — dags att kolla resultatet!',
+                tag=f'settled-{week["id"]}',
+            )
+    return changed
 
 def public_data(data):
     """Strip password hashes before this ever reaches the client. last_login rides along here
@@ -410,6 +515,15 @@ def background_poller():
                         fetch_result(product, dn)
             except Exception as e:
                 print(f'Background poller error ({product}): {e}')
+        try:
+            data = load_data()
+            notif_changed = check_first_match_notifications(data)
+            if check_settlement_notifications(data):
+                notif_changed = True
+            if notif_changed:
+                save_data(data)
+        except Exception as e:
+            print(f'Background poller notification check error: {e}')
         time.sleep(LIVE_POLL_SECONDS if any_live else IDLE_POLL_SECONDS)
 
 threading.Thread(target=background_poller, daemon=True).start()
@@ -640,13 +754,49 @@ def save_coupon():
         'created_at': datetime.now(timezone.utc).isoformat(),
     }
 
+    is_new_week = idx is None
     if idx is not None:
         weeks[idx] = week
     else:
         weeks.append(week)
 
+    # Only a genuinely new week fires the "new coupon" push — a re-upload correcting an existing
+    # one (see "Kupong shows all active coupons" in CLAUDE.md) shouldn't spam the group again.
+    if is_new_week:
+        broadcast_push(
+            data,
+            title='Ny kupong uppladdad',
+            body=f'{payload.get("uploaded_by") or "Någon"} laddade upp {PRODUCT_LABELS.get(product, product)} v{week.get("draw_number")}',
+            tag=f'new-coupon-{week_id}',
+            exclude_username=payload.get('uploaded_by_username'),
+        )
+
     save_data(data)
     return jsonify({'status': 'ok', 'week': week})
+
+@app.route('/api/push/vapid-public-key')
+def vapid_public_key():
+    return jsonify({'key': VAPID_PUBLIC_KEY})
+
+@app.route('/api/push/subscribe', methods=['POST'])
+def push_subscribe():
+    payload = request.json or {}
+    username = payload.get('username')
+    subscription = payload.get('subscription')
+    if not username or not subscription:
+        return jsonify({'status': 'error', 'message': 'Missing username or subscription'}), 400
+    data = load_data()
+    user = find_user(data, username)
+    if not user:
+        return jsonify({'status': 'error', 'message': 'Unknown user'}), 404
+    subs = user.setdefault('push_subscriptions', [])
+    # De-dupe by endpoint — re-logging-in on the same device/browser shouldn't pile up duplicate
+    # subscriptions (each of which would otherwise get its own push, i.e. duplicate notifications).
+    endpoint = subscription.get('endpoint')
+    subs[:] = [s for s in subs if s.get('endpoint') != endpoint]
+    subs.append(subscription)
+    save_data(data)
+    return jsonify({'status': 'ok'})
 
 @app.route('/api/coupon/image/<week_id>', methods=['GET', 'DELETE'])
 def coupon_image(week_id):

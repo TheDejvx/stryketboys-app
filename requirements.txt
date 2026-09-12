@@ -4,3 +4,4 @@ waitress
 requests
 google-genai
 Pillow
+pywebpush
