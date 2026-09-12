@@ -622,27 +622,41 @@ function reportPushStage(username, stage, detail) {
     }).catch(() => {});
   } catch (e) { /* even the report must never throw into the caller */ }
 }
+// A step that never resolves (observed: zero diagnostic signal even after a confirmed
+// permission grant + fresh reinstall — meaning something HANGS rather than throws) is
+// indistinguishable from "never called" unless it's raced against a timeout that reports itself.
+function withTimeout(promise, ms, label) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(`timeout:${label}`)), ms)),
+  ]);
+}
 async function subscribeToPush(username) {
+  reportPushStage(username, 'started'); // fires synchronously before any await — proves the call happened at all
   try {
     if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
       reportPushStage(username, 'unsupported');
       return;
     }
-    const permission = await Notification.requestPermission();
+    reportPushStage(username, 'requesting-permission');
+    const permission = await withTimeout(Notification.requestPermission(), 15000, 'permission-prompt');
     if (permission !== 'granted') {
       reportPushStage(username, 'permission-' + permission);
       return;
     }
-    const registration = await navigator.serviceWorker.ready;
+    reportPushStage(username, 'permission-granted-waiting-sw');
+    const registration = await withTimeout(navigator.serviceWorker.ready, 8000, 'sw-ready');
+    reportPushStage(username, 'sw-ready');
     let subscription = await registration.pushManager.getSubscription();
     if (!subscription) {
       const r = await fetch('/api/push/vapid-public-key');
       const { key } = await r.json();
       if (!key) { reportPushStage(username, 'no-vapid-key'); return; }
-      subscription = await registration.pushManager.subscribe({
+      reportPushStage(username, 'calling-pushManager-subscribe');
+      subscription = await withTimeout(registration.pushManager.subscribe({
         userVisibleOnly: true,
         applicationServerKey: urlBase64ToUint8Array(key),
-      });
+      }), 8000, 'pushManager-subscribe');
     }
     await fetch('/api/push/subscribe', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
