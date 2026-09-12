@@ -803,11 +803,13 @@ def push_test():
     delivery end-to-end after the service-worker-scope bug fix (see CLAUDE.md)."""
     payload = request.json or {}
     username = payload.get('username')
+    title = payload.get('title') or 'Testnotis'
+    body = payload.get('body') or 'Om du ser detta funkar push-notiser! 🎉'
     data = load_data()
     user = find_user(data, username)
     if not user:
         return jsonify({'status': 'error', 'message': 'Unknown user'}), 404
-    if broadcast_push({'users': [user]}, title='Testnotis', body='Om du ser detta funkar push-notiser! 🎉', tag='test-push'):
+    if broadcast_push({'users': [user]}, title=title, body=body, tag='test-push'):
         for u in data.get('users', []):
             if u.get('username') == user.get('username'):
                 u['push_subscriptions'] = user.get('push_subscriptions')
