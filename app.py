@@ -67,6 +67,13 @@ def load_data():
         data = fallback
     data.setdefault('uploader_rotation', DEFAULT_UPLOADER_ROTATION)
     data.setdefault('uploader_rotation_index', 0)
+    # One-time self-healing default, same pattern as uploader_rotation above: grant david the
+    # admin flag if nobody has it yet, rather than needing a manual DB migration. Only ever sets
+    # it — never revokes an is_admin someone might deliberately grant to another user later.
+    if not any(u.get('is_admin') for u in data.get('users', [])):
+        for u in data.get('users', []):
+            if u.get('username') == 'david':
+                u['is_admin'] = True
     return data
 
 def save_data(data):
@@ -266,6 +273,7 @@ def public_data(data):
                 'display_name': u.get('display_name'),
                 'must_change_password': u.get('must_change_password', False),
                 'last_login': u.get('last_login'),
+                'is_admin': u.get('is_admin', False),
             }
             for u in data.get('users', [])
         ],
@@ -815,6 +823,57 @@ def push_test():
                 u['push_subscriptions'] = user.get('push_subscriptions')
         save_data(data)
     return jsonify({'status': 'ok'})
+
+def _require_admin(username):
+    """Same trust level as the rest of this friend-app's session model (see 'Edit-lock' in
+    CLAUDE.md) — not cryptographic auth, just checking the stored is_admin flag server-side
+    rather than trusting a client-sent claim outright. Returns the requesting user's own record
+    (so callers get the real data, not just a bool) or None if not admin."""
+    data = load_data()
+    user = find_user(data, username)
+    if not user or not user.get('is_admin'):
+        return None, data
+    return user, data
+
+@app.route('/api/admin/overview')
+def admin_overview():
+    requester, data = _require_admin(request.args.get('username'))
+    if not requester:
+        return jsonify({'status': 'error', 'message': 'Forbidden'}), 403
+    users = [{
+        'username': u.get('username'),
+        'display_name': u.get('display_name'),
+        'last_login': u.get('last_login'),
+        'push_enabled': bool(u.get('push_subscriptions')),
+        'push_subscription_count': len(u.get('push_subscriptions') or []),
+    } for u in data.get('users', [])]
+    return jsonify({'status': 'ok', 'users': users})
+
+@app.route('/api/admin/push-broadcast', methods=['POST'])
+def admin_push_broadcast():
+    payload = request.json or {}
+    requester, data = _require_admin(payload.get('username'))
+    if not requester:
+        return jsonify({'status': 'error', 'message': 'Forbidden'}), 403
+    title = (payload.get('title') or '').strip()
+    body = (payload.get('body') or '').strip()
+    if not title or not body:
+        return jsonify({'status': 'error', 'message': 'Titel och text krävs'}), 400
+    targets = payload.get('targets')  # list of usernames, or 'all'/omitted for everyone
+    all_users = data.get('users', [])
+    if not targets or targets == 'all':
+        target_users = all_users
+    else:
+        target_set = {t.lower() for t in targets}
+        target_users = [u for u in all_users if (u.get('username') or '').lower() in target_set]
+    would_reach = sum(len(u.get('push_subscriptions') or []) for u in target_users)
+    if broadcast_push({'users': target_users}, title=title, body=body, tag='admin-broadcast'):
+        by_username = {u.get('username'): u for u in target_users}
+        for u in all_users:
+            if u.get('username') in by_username:
+                u['push_subscriptions'] = by_username[u.get('username')]['push_subscriptions']
+        save_data(data)
+    return jsonify({'status': 'ok', 'targeted_users': len(target_users), 'would_reach_devices': would_reach})
 
 @app.route('/api/push/debug', methods=['POST'])
 def push_debug():
