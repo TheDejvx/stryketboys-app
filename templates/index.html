@@ -1044,6 +1044,13 @@ function renderUploaderSchedule() {
   if (!rotation.length || !draw || !draw.reg_close_time) { el.innerHTML = ''; return; }
 
   const anchor = new Date(draw.reg_close_time);
+  // If the current draw's coupon is already uploaded, advanceUploaderRotation() has already
+  // moved the pointer past whoever just uploaded it — so rotation_index now points at the person
+  // slated for the *next* draw, not this one. Without this offset, the schedule showed that next
+  // person's name attached to this week's (already-passed) close date instead of next week's.
+  const currentDrawHasCoupon = (state.weeks || []).some(w =>
+    (w.product || 'stryktipset') === 'stryktipset' && w.draw_number === draw.draw_number);
+  const weekOffset = currentDrawHasCoupon ? 1 : 0;
   const startIdx = state.uploader_rotation_index || 0;
   const rows = [];
   for (let i = 0; i < 10; i++) {
@@ -1051,7 +1058,7 @@ function renderUploaderSchedule() {
     const username = rotation[idx];
     const user = (state.users || []).find(u => u.username === username);
     const name = user ? user.display_name : username;
-    const date = new Date(anchor.getTime() + i * 7 * 24 * 60 * 60 * 1000);
+    const date = new Date(anchor.getTime() + (i + weekOffset) * 7 * 24 * 60 * 60 * 1000);
     const dateStr = date.toLocaleDateString('sv-SE', { weekday: 'short', day: 'numeric', month: 'short' });
     rows.push(`<div class="schedule-row${i === 0 ? ' schedule-current' : ''}">
       <span class="schedule-name"><span class="schedule-turn">#${i + 1}</span>${esc(name)}</span>
