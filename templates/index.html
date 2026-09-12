@@ -305,6 +305,15 @@ body {
 .install-platform ol { padding-left: 16px; font-size: 13px; line-height: 1.7; opacity: .9; }
 .install-android-btn { margin-top: 10px; }
 
+/* ── ADMIN ── */
+.target-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 7px 12px; border-radius: 20px; border: 1.5px solid var(--border);
+  background: var(--white); font-size: 13px; cursor: pointer; user-select: none;
+}
+.target-chip input { accent-color: var(--primary); }
+.target-chip.checked { background: var(--primary); border-color: var(--primary); color: var(--white); }
+
 @media (max-width: 480px) {
   .summary-item .value { font-size: 15px; }
   .summary-item .label { font-size: 9px; }
@@ -328,6 +337,7 @@ body {
       <button class="tab-btn active" id="tab-btn-kupong" onclick="switchTab('kupong')">🎟️ Kupong</button>
       <button class="tab-btn" id="tab-btn-historik" onclick="switchTab('historik')">📜 Historik</button>
       <button class="tab-btn" id="tab-btn-statistik" onclick="switchTab('statistik')">📈 Statistik</button>
+      <button class="tab-btn" id="tab-btn-admin" onclick="switchTab('admin')" style="display:none">🛠️ Admin</button>
     </div>
 
     <!-- KUPONG -->
@@ -421,6 +431,36 @@ body {
         <div class="card-header"><h2>👥 Gubbar</h2></div>
         <div class="card-body">
           <div class="player-grid" id="player-grid"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ADMIN (David only — tab button and content both gated client-side by is_admin; the
+         actual data fetch is separately gated server-side, see _require_admin() in app.py) -->
+    <div class="tab-content" id="tab-admin">
+      <div class="card">
+        <div class="card-header"><h2>📣 Skicka push-notis</h2></div>
+        <div class="card-body">
+          <div class="form-row">
+            <label>Titel</label>
+            <input type="text" id="admin-push-title" placeholder="StryketBoys" maxlength="60">
+          </div>
+          <div class="form-row">
+            <label>Text</label>
+            <input type="text" id="admin-push-body" placeholder="Meddelande..." maxlength="200">
+          </div>
+          <div class="form-row">
+            <label>Mottagare</label>
+            <div id="admin-push-targets" style="display:flex;flex-wrap:wrap;gap:8px"></div>
+          </div>
+          <button class="btn btn-primary" onclick="sendAdminPush()">📣 Skicka</button>
+          <div id="admin-push-status" style="margin-top:10px;font-size:12px;color:var(--muted)"></div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-header"><h2>🔔 Push-status &amp; senaste inloggning</h2></div>
+        <div id="admin-overview-body">
+          <div class="loading-row">Laddar...</div>
         </div>
       </div>
     </div>
@@ -610,31 +650,74 @@ function urlBase64ToUint8Array(base64String) {
   const raw = atob(base64);
   return Uint8Array.from([...raw].map(c => c.charCodeAt(0)));
 }
-async function subscribeToPush(username) {
+// Reports every stage (including each silent early-return) to the server so a failed
+// subscription is diagnosable from `railway logs` — mobile Safari's console isn't practically
+// reachable without a Mac + USB, so client-side console.error alone was undebuggable in practice
+// (confirmed: every user showed 0 stored subscriptions with nothing to explain why).
+function reportPushStage(username, stage, detail) {
   try {
-    if (!('serviceWorker' in navigator) || !('PushManager' in window)) return;
-    const permission = await Notification.requestPermission();
-    if (permission !== 'granted') return;
-    const registration = await navigator.serviceWorker.ready;
+    fetch('/api/push/debug', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, stage, detail: String(detail || ''), ua: navigator.userAgent }),
+    }).catch(() => {});
+  } catch (e) { /* even the report must never throw into the caller */ }
+}
+// A step that never resolves (observed: zero diagnostic signal even after a confirmed
+// permission grant + fresh reinstall — meaning something HANGS rather than throws) is
+// indistinguishable from "never called" unless it's raced against a timeout that reports itself.
+function withTimeout(promise, ms, label) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(`timeout:${label}`)), ms)),
+  ]);
+}
+async function subscribeToPush(username) {
+  reportPushStage(username, 'started'); // fires synchronously before any await — proves the call happened at all
+  try {
+    if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+      reportPushStage(username, 'unsupported');
+      return;
+    }
+    reportPushStage(username, 'requesting-permission');
+    const permission = await withTimeout(Notification.requestPermission(), 15000, 'permission-prompt');
+    if (permission !== 'granted') {
+      reportPushStage(username, 'permission-' + permission);
+      return;
+    }
+    reportPushStage(username, 'permission-granted-waiting-sw');
+    const registration = await withTimeout(navigator.serviceWorker.ready, 8000, 'sw-ready');
+    reportPushStage(username, 'sw-ready');
     let subscription = await registration.pushManager.getSubscription();
     if (!subscription) {
       const r = await fetch('/api/push/vapid-public-key');
       const { key } = await r.json();
-      if (!key) return; // VAPID not configured server-side yet
-      subscription = await registration.pushManager.subscribe({
+      if (!key) { reportPushStage(username, 'no-vapid-key'); return; }
+      reportPushStage(username, 'calling-pushManager-subscribe');
+      subscription = await withTimeout(registration.pushManager.subscribe({
         userVisibleOnly: true,
         applicationServerKey: urlBase64ToUint8Array(key),
-      });
+      }), 8000, 'pushManager-subscribe');
     }
     await fetch('/api/push/subscribe', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ username, subscription: subscription.toJSON() }),
     });
+    reportPushStage(username, 'subscribed-ok');
   } catch (e) {
+    reportPushStage(username, 'exception', (e && e.message) || e);
     console.error('Push subscription failed', e);
   }
 }
 
+// Client-side gate is just for hiding the tab from everyone else's view — the actual data
+// fetch (renderAdminOverview) is separately checked server-side against the real stored
+// is_admin flag (_require_admin() in app.py), same trust level as the rest of this app.
+function isAdminUser() {
+  const session = getSession();
+  if (!session) return false;
+  const user = (state.users || []).find(u => u.username === session.username);
+  return !!(user && user.is_admin);
+}
 function updateAuthUI() {
   const session = getSession();
   const btn = document.getElementById('lock-btn');
@@ -647,6 +730,8 @@ function updateAuthUI() {
     btn.classList.remove('unlocked');
     btn.onclick = () => requireAuth(() => {});
   }
+  const adminBtn = document.getElementById('tab-btn-admin');
+  if (adminBtn) adminBtn.style.display = isAdminUser() ? '' : 'none';
 }
 
 // ── STATE ──
@@ -888,6 +973,7 @@ function switchTab(name) {
   document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
   document.getElementById('tab-' + name).classList.add('active');
   document.getElementById('tab-btn-' + name).classList.add('active');
+  if (name === 'admin') renderAdminOverview();
 }
 
 // ── RENDER ──
@@ -1566,6 +1652,77 @@ function renderPlayers() {
   }).join('');
 }
 
+// ── ADMIN (David only) ──
+async function renderAdminOverview() {
+  const session = getSession();
+  const body = document.getElementById('admin-overview-body');
+  const targetsEl = document.getElementById('admin-push-targets');
+  if (!session || !body || !targetsEl) return;
+  try {
+    const r = await fetch(`/api/admin/overview?username=${encodeURIComponent(session.username)}`);
+    const data = await r.json();
+    if (data.status !== 'ok') {
+      body.innerHTML = `<div class="no-data"><div class="icon">🔒</div><div>Ingen åtkomst.</div></div>`;
+      targetsEl.innerHTML = '';
+      return;
+    }
+    body.innerHTML = data.users.map(u => {
+      const loginStr = u.last_login
+        ? new Date(u.last_login).toLocaleString('sv-SE', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })
+        : 'Aldrig';
+      const pushStr = u.push_enabled ? `🔔 På (${u.push_subscription_count})` : '🔕 Av';
+      return `<div class="schedule-row">
+        <span class="schedule-name">${esc(u.display_name)}</span>
+        <span class="schedule-date">${pushStr} · Inloggad ${esc(loginStr)}</span>
+      </div>`;
+    }).join('');
+
+    targetsEl.innerHTML = `<label class="target-chip" data-value="all"><input type="checkbox" value="all" onchange="onAdminTargetToggle(this)"> Alla</label>` +
+      data.users.map(u => `<label class="target-chip" data-value="${esc(u.username)}">
+        <input type="checkbox" value="${esc(u.username)}" onchange="onAdminTargetToggle(this)"> ${esc(u.display_name)}${u.push_enabled ? '' : ' (ingen push)'}
+      </label>`).join('');
+  } catch (e) {
+    body.innerHTML = `<div class="no-data"><div class="icon">⚠️</div><div>Kunde inte hämta admin-data.</div></div>`;
+  }
+}
+// "Alla" and individual users are mutually exclusive selections — picking one clears the other,
+// so it's always unambiguous which the backend's targets:'all' vs targets:[...] path should take.
+function onAdminTargetToggle(checkbox) {
+  checkbox.closest('.target-chip').classList.toggle('checked', checkbox.checked);
+  const allCb = document.querySelector('#admin-push-targets input[value="all"]');
+  if (checkbox.value === 'all' && checkbox.checked) {
+    document.querySelectorAll('#admin-push-targets input[type="checkbox"]').forEach(cb => {
+      if (cb.value !== 'all') { cb.checked = false; cb.closest('.target-chip').classList.remove('checked'); }
+    });
+  } else if (checkbox.value !== 'all' && checkbox.checked && allCb) {
+    allCb.checked = false;
+    allCb.closest('.target-chip').classList.remove('checked');
+  }
+}
+async function sendAdminPush() {
+  const session = getSession();
+  if (!session) return;
+  const title = document.getElementById('admin-push-title').value.trim() || 'StryketBoys';
+  const body = document.getElementById('admin-push-body').value.trim();
+  const statusEl = document.getElementById('admin-push-status');
+  if (!body) { statusEl.textContent = 'Skriv ett meddelande först.'; return; }
+  const checked = [...document.querySelectorAll('#admin-push-targets input[type="checkbox"]:checked')].map(cb => cb.value);
+  const targets = (checked.length === 0 || checked.includes('all')) ? 'all' : checked;
+  statusEl.textContent = 'Skickar...';
+  try {
+    const r = await fetch('/api/admin/push-broadcast', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: session.username, title, body, targets }),
+    });
+    const data = await r.json();
+    if (data.status !== 'ok') { statusEl.textContent = 'Fel: ' + (data.message || 'okänt fel'); return; }
+    statusEl.textContent = `Skickat till ${data.targeted_users} användare (${data.would_reach_devices} enheter med push aktiverat).`;
+    document.getElementById('admin-push-body').value = '';
+  } catch (e) {
+    statusEl.textContent = 'Kunde inte skicka.';
+  }
+}
+
 // ── PWA INSTALL ──
 let deferredInstallPrompt = null;
 window.addEventListener('beforeinstallprompt', (e) => {
@@ -1584,7 +1741,14 @@ async function installApp() {
 }
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
-    navigator.serviceWorker.register('/static/sw.js').catch(e => console.error('sw register', e));
+    // Root cause of push subscriptions silently hanging forever (found via subscribeToPush()'s
+    // timeout diagnostics: stuck at 'sw-ready' every time): registering '/static/sw.js' with no
+    // explicit scope defaults the scope to '/static/' — the script's own directory — so it could
+    // never control the actual app page at '/', and navigator.serviceWorker.ready (awaited from
+    // that page) had nothing to ever resolve to. { scope: '/' } fixes the client side; the server
+    // must also send a Service-Worker-Allowed: / header for a script outside the target scope to
+    // be allowed to claim it (see add_sw_scope_header in app.py).
+    navigator.serviceWorker.register('/static/sw.js', { scope: '/' }).catch(e => console.error('sw register', e));
   });
 }
 

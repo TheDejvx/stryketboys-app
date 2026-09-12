@@ -8,6 +8,18 @@ from PIL import Image
 app = Flask(__name__)
 DATA_FILE = os.path.join(os.path.dirname(__file__), 'stryk_data.json')
 
+@app.after_request
+def add_sw_scope_header(response):
+    """A service worker script served from /static/sw.js is, by default, only allowed to control
+    pages under /static/ — the browser refuses a broader scope claim (see the frontend's
+    { scope: '/' } registration) unless the server explicitly grants it via this header. Root
+    cause of push subscriptions hanging forever at serviceWorker.ready: without this, the SW
+    registered "successfully" but could never actually control the app's page at '/', so nothing
+    was ever there for .ready to resolve to."""
+    if request.path == '/static/sw.js':
+        response.headers['Service-Worker-Allowed'] = '/'
+    return response
+
 # Web Push (see "Push notifications" in CLAUDE.md). Both keys come from a one-time-generated
 # VAPID key pair set as Railway env vars — push sending no-ops quietly if they're not set,
 # same pattern as GEMINI_API_KEY/get_gemini().
@@ -55,6 +67,13 @@ def load_data():
         data = fallback
     data.setdefault('uploader_rotation', DEFAULT_UPLOADER_ROTATION)
     data.setdefault('uploader_rotation_index', 0)
+    # One-time self-healing default, same pattern as uploader_rotation above: grant david the
+    # admin flag if nobody has it yet, rather than needing a manual DB migration. Only ever sets
+    # it — never revokes an is_admin someone might deliberately grant to another user later.
+    if not any(u.get('is_admin') for u in data.get('users', [])):
+        for u in data.get('users', []):
+            if u.get('username') == 'david':
+                u['is_admin'] = True
     return data
 
 def save_data(data):
@@ -313,6 +332,7 @@ def public_data(data):
                 'display_name': u.get('display_name'),
                 'must_change_password': u.get('must_change_password', False),
                 'last_login': u.get('last_login'),
+                'is_admin': u.get('is_admin', False),
             }
             for u in data.get('users', [])
         ],
@@ -844,6 +864,88 @@ def save_coupon():
 @app.route('/api/push/vapid-public-key')
 def vapid_public_key():
     return jsonify({'key': VAPID_PUBLIC_KEY})
+
+@app.route('/api/push/test', methods=['POST'])
+def push_test():
+    """Manual one-off test send — same broadcast_push() path as real notifications, but scoped to
+    a single user (`username` in the payload) rather than the whole group. Used to confirm actual
+    delivery end-to-end after the service-worker-scope bug fix (see CLAUDE.md)."""
+    payload = request.json or {}
+    username = payload.get('username')
+    title = payload.get('title') or 'Testnotis'
+    body = payload.get('body') or 'Om du ser detta funkar push-notiser! 🎉'
+    data = load_data()
+    user = find_user(data, username)
+    if not user:
+        return jsonify({'status': 'error', 'message': 'Unknown user'}), 404
+    if broadcast_push({'users': [user]}, title=title, body=body, tag='test-push'):
+        for u in data.get('users', []):
+            if u.get('username') == user.get('username'):
+                u['push_subscriptions'] = user.get('push_subscriptions')
+        save_data(data)
+    return jsonify({'status': 'ok'})
+
+def _require_admin(username):
+    """Same trust level as the rest of this friend-app's session model (see 'Edit-lock' in
+    CLAUDE.md) — not cryptographic auth, just checking the stored is_admin flag server-side
+    rather than trusting a client-sent claim outright. Returns the requesting user's own record
+    (so callers get the real data, not just a bool) or None if not admin."""
+    data = load_data()
+    user = find_user(data, username)
+    if not user or not user.get('is_admin'):
+        return None, data
+    return user, data
+
+@app.route('/api/admin/overview')
+def admin_overview():
+    requester, data = _require_admin(request.args.get('username'))
+    if not requester:
+        return jsonify({'status': 'error', 'message': 'Forbidden'}), 403
+    users = [{
+        'username': u.get('username'),
+        'display_name': u.get('display_name'),
+        'last_login': u.get('last_login'),
+        'push_enabled': bool(u.get('push_subscriptions')),
+        'push_subscription_count': len(u.get('push_subscriptions') or []),
+    } for u in data.get('users', [])]
+    return jsonify({'status': 'ok', 'users': users})
+
+@app.route('/api/admin/push-broadcast', methods=['POST'])
+def admin_push_broadcast():
+    payload = request.json or {}
+    requester, data = _require_admin(payload.get('username'))
+    if not requester:
+        return jsonify({'status': 'error', 'message': 'Forbidden'}), 403
+    title = (payload.get('title') or '').strip()
+    body = (payload.get('body') or '').strip()
+    if not title or not body:
+        return jsonify({'status': 'error', 'message': 'Titel och text krävs'}), 400
+    targets = payload.get('targets')  # list of usernames, or 'all'/omitted for everyone
+    all_users = data.get('users', [])
+    if not targets or targets == 'all':
+        target_users = all_users
+    else:
+        target_set = {t.lower() for t in targets}
+        target_users = [u for u in all_users if (u.get('username') or '').lower() in target_set]
+    would_reach = sum(len(u.get('push_subscriptions') or []) for u in target_users)
+    if broadcast_push({'users': target_users}, title=title, body=body, tag='admin-broadcast'):
+        by_username = {u.get('username'): u for u in target_users}
+        for u in all_users:
+            if u.get('username') in by_username:
+                u['push_subscriptions'] = by_username[u.get('username')]['push_subscriptions']
+        save_data(data)
+    return jsonify({'status': 'ok', 'targeted_users': len(target_users), 'would_reach_devices': would_reach})
+
+@app.route('/api/push/debug', methods=['POST'])
+def push_debug():
+    """Diagnostic-only sink for subscribeToPush()'s client-side stages — added specifically
+    because every user showed 0 stored push_subscriptions with no way to tell why (mobile
+    Safari's console isn't practically reachable without a Mac + USB). Just logs; nothing
+    persisted, nothing this can break."""
+    payload = request.json or {}
+    print(f"push_debug: user={payload.get('username')} stage={payload.get('stage')} "
+          f"detail={payload.get('detail')!r} ua={payload.get('ua')!r}")
+    return jsonify({'status': 'ok'})
 
 @app.route('/api/push/subscribe', methods=['POST'])
 def push_subscribe():

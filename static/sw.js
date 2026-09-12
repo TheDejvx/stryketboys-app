@@ -1,4 +1,4 @@
-const CACHE = 'stryketboys-v1';
+const CACHE = 'stryketboys-v2'; // bumped to force-discard any stale cached page/assets from before push notifications shipped
 const SHELL = ['/'];
 
 self.addEventListener('install', e => {
