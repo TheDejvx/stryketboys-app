@@ -683,6 +683,9 @@ function withTimeout(promise, ms, label) {
     new Promise((_, reject) => setTimeout(() => reject(new Error(`timeout:${label}`)), ms)),
   ]);
 }
+// Remembered separately from the login session (30-day TTL, needs a password to re-establish) —
+// see ensurePushSubscription() below for why.
+const PUSH_IDENTITY_KEY = 'stryk_push_identity';
 async function subscribeToPush(username) {
   reportPushStage(username, 'started'); // fires synchronously before any await — proves the call happened at all
   try {
@@ -714,10 +717,35 @@ async function subscribeToPush(username) {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ username, subscription: subscription.toJSON() }),
     });
+    localStorage.setItem(PUSH_IDENTITY_KEY, username);
     reportPushStage(username, 'subscribed-ok');
   } catch (e) {
     reportPushStage(username, 'exception', (e && e.message) || e);
     console.error('Push subscription failed', e);
+  }
+}
+// Runs on every app load regardless of login state — receiving a push has always been purely
+// server -> browser via the stored subscription, with no runtime dependency on the app's own
+// login state, so repairing one shouldn't need it either. Repairs a subscription the browser
+// dropped (e.g. after a reinstall) as long as notification permission is still granted, using
+// whichever identity is available (the active login session, or the last-remembered push
+// identity via PUSH_IDENTITY_KEY if there isn't one). Never silently asks for permission — only
+// ever repairs an existing grant, so this can't surprise anyone who never opted in. This is what
+// makes a future round of dropped subscriptions self-heal on its own instead of needing another
+// forced group-wide re-login (see SESSION_KEY history above).
+async function ensurePushSubscription() {
+  try {
+    if (!('serviceWorker' in navigator) || !('PushManager' in window)) return;
+    if (Notification.permission !== 'granted') return;
+    const session = getSession();
+    const username = (session && session.username) || localStorage.getItem(PUSH_IDENTITY_KEY);
+    if (!username) return;
+    const registration = await withTimeout(navigator.serviceWorker.ready, 8000, 'sw-ready');
+    const existing = await registration.pushManager.getSubscription();
+    if (existing) return;
+    await subscribeToPush(username);
+  } catch (e) {
+    console.error('ensurePushSubscription failed', e);
   }
 }
 
@@ -795,6 +823,7 @@ let saveTimer = null;
 async function init() {
   await loadData(); // populates state.weeks first — neededDraws() below reads it
   await loadAllDraws();
+  ensurePushSubscription(); // fire-and-forget — see its own comment for why this runs unconditionally
 }
 // Every draw_number we need fresh data for right now: each product's currently-open draw, plus
 // every product's not-yet-fully-settled week's draw_number (which can differ from "current" —
