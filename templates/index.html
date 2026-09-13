@@ -519,10 +519,15 @@ body {
 
 <script>
 // ── AUTH (per-user login) ──
-// Bumped v1 -> v2 to force everyone to log back in when push notifications shipped (see below) —
-// existing v1 sessions in localStorage are simply never read again under the new key, no server
-// coordination needed. Only bump this again for a deliberate "log everyone out" moment.
-const SESSION_KEY = 'stryk_session_v2';
+// Bumped v1 -> v2 to force everyone to log back in when push notifications shipped. Bumped again
+// v2 -> v3 after most of the group's push_subscriptions were found pruned (the push service
+// started reporting them as gone — likely a client-side reinstall/permission reset on several
+// devices) despite the service-worker-scope fix being in place; forcing a fresh login re-runs
+// subscribeToPush() for everyone. For anyone whose browser still has notification permission
+// granted, this silently re-subscribes with no new prompt — only someone who actually reset the
+// permission (e.g. a reinstall) sees "Tillåt" again. Only bump this again for a deliberate
+// "log everyone out" moment.
+const SESSION_KEY = 'stryk_session_v3';
 const SESSION_TTL = 30 * 24 * 60 * 60 * 1000; // 30 days
 let pendingAction = null;
 let loginStep = 'login'; // 'login' | 'change'
