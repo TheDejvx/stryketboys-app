@@ -929,6 +929,23 @@ async function manualRefresh(product, btn, drawNumber) {
 // self-throttles its own poll speed based on whether a match is live, so this client poll is just
 // cheap re-reads of that cache.
 setInterval(() => { loadAllDraws(); }, 20000);
+// Bug fixed: state.weeks (the coupon list itself) was only ever fetched once, in init() — unlike
+// draw/live-score data above, nothing re-fetched it afterward. A phone that had the PWA open (or
+// merely backgrounded, not force-closed) from before someone else uploaded that week's coupon
+// would just never see it appear — no error, no visible sign anything was wrong, since the app
+// looked fully functional on whatever stale state it already had. Real report: Tommy couldn't see
+// the active coupon while David, who'd freshly (re)opened the app, saw it fine. Fixed by
+// re-fetching /api/data whenever the app returns to the foreground (tab/PWA un-backgrounded) —
+// deliberately not a continuous poll like the draw data above, since state.weeks also holds this
+// device's own not-yet-saved edits (settled_result taps etc, flushed via saveDataDebounced()) and
+// polling mid-edit risks the server's older copy clobbering them; a visibility change only fires
+// when coming back from background, by which point any such edit already had time to flush.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') {
+    loadData();
+    loadAllDraws();
+  }
+});
 // ── HELPERS ──
 function esc(s) { return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 function findEvent(matchId, product, drawNumber) { return (drawFor(product, drawNumber)?.events || []).find(e => e.match_id === matchId) || null; }
