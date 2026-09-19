@@ -740,6 +740,15 @@ async function subscribeToPush(username) {
 // ever repairs an existing grant, so this can't surprise anyone who never opted in. This is what
 // makes a future round of dropped subscriptions self-heal on its own instead of needing another
 // forced group-wide re-login (see SESSION_KEY history above).
+//
+// A subscription that exists locally is re-POSTed to the server every time, not just skipped —
+// asked for directly: pushes should keep working "next week too" without needing to log back in.
+// A stored subscription can go missing server-side for reasons that have nothing to do with the
+// browser's own copy (a dropped-as-gone prune after a failed send, e.g.) — the browser's local
+// pushManager.getSubscription() has no way to know that happened, so silently no-op'ing on
+// "already have one" left exactly that gap open. Re-sending is cheap and safe: POST /api/push/
+// subscribe de-dupes by endpoint server-side, so this is a no-op write when nothing's actually
+// wrong, not a way to spam duplicate subscriptions.
 async function ensurePushSubscription() {
   try {
     if (!('serviceWorker' in navigator) || !('PushManager' in window)) return;
@@ -749,8 +758,15 @@ async function ensurePushSubscription() {
     if (!username) return;
     const registration = await withTimeout(navigator.serviceWorker.ready, 8000, 'sw-ready');
     const existing = await registration.pushManager.getSubscription();
-    if (existing) return;
-    await subscribeToPush(username);
+    if (!existing) {
+      await subscribeToPush(username);
+      return;
+    }
+    await fetch('/api/push/subscribe', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, subscription: existing.toJSON() }),
+    });
+    localStorage.setItem(PUSH_IDENTITY_KEY, username);
   } catch (e) {
     console.error('ensurePushSubscription failed', e);
   }
@@ -944,6 +960,7 @@ document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') {
     loadData();
     loadAllDraws();
+    ensurePushSubscription(); // re-verify/refresh with the server every time the app comes back to the foreground, not just on a full reload — see its own comment for why
   }
 });
 // ── HELPERS ──
