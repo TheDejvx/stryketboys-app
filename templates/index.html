@@ -1903,8 +1903,21 @@ async function sendAdminPush() {
       body: JSON.stringify({ username: session.username, title, body, targets }),
     });
     const data = await r.json();
-    if (data.status !== 'ok') { statusEl.textContent = 'Fel: ' + (data.message || 'okänt fel'); return; }
-    statusEl.textContent = `Skickat till ${data.targeted_users} användare (${data.would_reach_devices} enheter med push aktiverat).`;
+    if (data.status !== 'ok') { statusEl.innerHTML = 'Fel: ' + esc(data.message || 'okänt fel'); return; }
+    // Per-user delivery outcome, not just an aggregate count — a stored subscription can look
+    // fine for a long time after the push service has silently revoked it (only discovered on
+    // an actual send attempt), so this is the real way to tell who's genuinely still reachable
+    // without needing to check Railway logs.
+    const delivery = data.delivery || {};
+    const rows = Object.keys(delivery).map(username => {
+      const user = (state.users || []).find(u => u.username === username);
+      const name = user ? user.display_name : username;
+      const ok = delivery[username].startsWith('sent');
+      return `<div style="display:flex;justify-content:space-between;gap:8px">
+        <span>${esc(name)}</span><span style="color:${ok ? 'var(--muted)' : '#c0392b'}">${esc(delivery[username])}</span>
+      </div>`;
+    }).join('');
+    statusEl.innerHTML = `<div style="margin-bottom:6px">Skickat till ${data.targeted_users} användare (${data.would_reach_devices} enheter med push aktiverat):</div>${rows}`;
     document.getElementById('admin-push-body').value = '';
   } catch (e) {
     statusEl.textContent = 'Kunde inte skicka.';

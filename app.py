@@ -191,26 +191,42 @@ def week_date_label(rows, draw_number):
         return f'v{draw_number}'
     return format_draw_date(min(starts))
 
-def broadcast_push(data, title, body, tag=None, exclude_username=None):
+def broadcast_push(data, title, body, tag=None, exclude_username=None, results_out=None):
     """Send a Web Push notification to every user with at least one stored subscription.
     Mutates data['users'][*]['push_subscriptions'] in place to drop subscriptions the push
     service reports as gone (404/410 — the browser unsubscribed, e.g. app uninstalled), so the
     caller should save_data(data) afterward if this returns True. No-ops quietly (returns False)
-    if VAPID keys aren't configured, same as decode's get_gemini() pattern for GEMINI_API_KEY."""
+    if VAPID keys aren't configured, same as decode's get_gemini() pattern for GEMINI_API_KEY.
+    `results_out`, if given a dict, gets populated {username: status_string} — added specifically
+    so /api/admin/push-broadcast can surface real per-user delivery outcomes in its response
+    instead of only an aggregate "would_reach_devices" count, which says a subscription was
+    *stored* but nothing about whether it's actually still deliverable (a subscription can look
+    fine server-side for a long time after the push service has silently revoked it, since that's
+    only discovered on the next real send attempt — see "Push notifications" in CLAUDE.md for the
+    history of subscriptions going silently stale). Other callers just omit it, unchanged."""
     if not (VAPID_PRIVATE_KEY and VAPID_PUBLIC_KEY):
         print(f'broadcast_push: skipped "{title}" — VAPID_PRIVATE_KEY/VAPID_PUBLIC_KEY not configured')
+        if results_out is not None:
+            for user in data.get('users', []):
+                results_out[user.get('username')] = 'VAPID keys not configured'
         return False
     from pywebpush import webpush, WebPushException
     changed = False
     sent, skipped_no_sub = 0, []
     for user in data.get('users', []):
-        if exclude_username and user.get('username', '').lower() == exclude_username.lower():
+        username = user.get('username')
+        if exclude_username and (username or '').lower() == exclude_username.lower():
+            if results_out is not None:
+                results_out[username] = 'excluded (uploader)'
             continue
         subs = user.get('push_subscriptions') or []
         if not subs:
-            skipped_no_sub.append(user.get('username'))
+            skipped_no_sub.append(username)
+            if results_out is not None:
+                results_out[username] = 'no subscription on file'
             continue
         keep = []
+        user_sent = user_dropped = user_failed = 0
         for sub in subs:
             try:
                 webpush(
@@ -221,16 +237,26 @@ def broadcast_push(data, title, body, tag=None, exclude_username=None):
                 )
                 keep.append(sub)
                 sent += 1
+                user_sent += 1
             except WebPushException as e:
                 status = getattr(e.response, 'status_code', None)
                 if status in (404, 410):
                     changed = True  # expired/unregistered subscription — drop it
-                    print(f'push subscription gone for {user.get("username")} (status {status}) — dropping it')
+                    user_dropped += 1
+                    print(f'push subscription gone for {username} (status {status}) — dropping it')
                     continue
-                print(f'push send failed for {user.get("username")}: {e}')
+                user_failed += 1
+                print(f'push send failed for {username}: {e}')
                 keep.append(sub)  # transient error — keep it, don't discard on a whim
         if len(keep) != len(subs):
             user['push_subscriptions'] = keep
+        if results_out is not None:
+            if user_sent:
+                results_out[username] = f'sent ({user_sent}/{len(subs)} device(s))'
+            elif user_dropped and not user_failed:
+                results_out[username] = f'subscription expired ({user_dropped} dropped) — needs to reopen the app'
+            else:
+                results_out[username] = f'send failed ({user_failed}) — see server logs'
     print(f'broadcast_push: "{title}" — sent to {sent} subscription(s), no subscription on file for {skipped_no_sub or "none"}')
     return changed
 
@@ -1150,13 +1176,14 @@ def admin_push_broadcast():
         target_set = {t.lower() for t in targets}
         target_users = [u for u in all_users if (u.get('username') or '').lower() in target_set]
     would_reach = sum(len(u.get('push_subscriptions') or []) for u in target_users)
-    if broadcast_push({'users': target_users}, title=title, body=body, tag='admin-broadcast'):
+    delivery = {}
+    if broadcast_push({'users': target_users}, title=title, body=body, tag='admin-broadcast', results_out=delivery):
         by_username = {u.get('username'): u for u in target_users}
         for u in all_users:
             if u.get('username') in by_username:
                 u['push_subscriptions'] = by_username[u.get('username')]['push_subscriptions']
         save_data(data)
-    return jsonify({'status': 'ok', 'targeted_users': len(target_users), 'would_reach_devices': would_reach})
+    return jsonify({'status': 'ok', 'targeted_users': len(target_users), 'would_reach_devices': would_reach, 'delivery': delivery})
 
 @app.route('/api/push/debug', methods=['POST'])
 def push_debug():
