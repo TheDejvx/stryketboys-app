@@ -1448,7 +1448,11 @@ function decodePreviewHtml() {
     </div>
     <div class="form-row" style="padding:0 16px">
       <label>Laddas upp av</label>
-      <div style="font-size:14px;font-weight:600">👤 ${esc(p.uploaded_by || '')}</div>
+      ${isAdminUser() ? `
+        <select onchange="updatePreviewUploader(this.value)">
+          ${(state.users || []).map(u => `<option value="${esc(u.username)}"${u.username === p.uploaded_by_username ? ' selected' : ''}>${esc(u.display_name)}</option>`).join('')}
+        </select>
+      ` : `<div style="font-size:14px;font-weight:600">👤 ${esc(p.uploaded_by || '')}</div>`}
     </div>
     <div style="margin-top:8px">${rowsHtml}</div>
     <div class="form-actions">
@@ -1471,6 +1475,16 @@ function togglePreviewPick(idx, sign) {
 }
 function updatePreviewField(idx, field, value) { decodePreview.rows[idx][field] = value; }
 function togglePreviewMarked(idx) { decodePreview.rows[idx].marked = !decodePreview.rows[idx].marked; render(); }
+// Admin-only override (see decodePreviewHtml()) — lets David upload on behalf of someone less
+// technically comfortable while still crediting the actual player, not himself: both fields are
+// switched together so the rest of the pipeline treats it exactly as if that person uploaded it
+// themselves (the "new coupon" push says their name and excludes *them*, not David, from it).
+function updatePreviewUploader(username) {
+  const user = (state.users || []).find(u => u.username === username);
+  if (!user) return;
+  decodePreview.uploaded_by = user.display_name;
+  decodePreview.uploaded_by_username = user.username;
+}
 function releaseDecodePreviewImage() {
   if (decodePreview && decodePreview.imageUrl) URL.revokeObjectURL(decodePreview.imageUrl);
 }
