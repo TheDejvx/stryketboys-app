@@ -1111,6 +1111,27 @@ def admin_goal_notifications():
     save_data(data)
     return jsonify({'status': 'ok'})
 
+@app.route('/api/admin/set-uploader-turn', methods=['POST'])
+def admin_set_uploader_turn():
+    """Manual correction for uploader_rotation_index — needed because advanceUploaderRotation()
+    just blindly moves the pointer forward by one on every successful save with no idea whether
+    that save was a genuine new upload or an accidental duplicate (e.g. a double-tapped Spara-
+    kupong button before it had a disabled/loading state — see CLAUDE.md). No way to fix a
+    pointer that's drifted without this."""
+    payload = request.json or {}
+    requester, data = _require_admin(payload.get('username'))
+    if not requester:
+        return jsonify({'status': 'error', 'message': 'Forbidden'}), 403
+    rotation = data.get('uploader_rotation') or []
+    target_username = (payload.get('target_username') or '').strip().lower()
+    try:
+        new_index = rotation.index(target_username)
+    except ValueError:
+        return jsonify({'status': 'error', 'message': 'Okänt användarnamn i rotationen'}), 400
+    data['uploader_rotation_index'] = new_index
+    save_data(data)
+    return jsonify({'status': 'ok'})
+
 @app.route('/api/admin/push-broadcast', methods=['POST'])
 def admin_push_broadcast():
     payload = request.json or {}
