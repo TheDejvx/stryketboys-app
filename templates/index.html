@@ -470,6 +470,13 @@ body {
           <div class="loading-row">Laddar...</div>
         </div>
       </div>
+      <div class="card">
+        <div class="card-header"><h2>📅 Justera vems tur det är</h2></div>
+        <div style="font-size:11px;color:var(--muted);padding:0 16px 8px">För att rätta till rotationen om den råkat hoppa fel (t.ex. efter en dubbelsparad kupong)</div>
+        <div class="card-body" id="admin-uploader-turn-body">
+          <div class="loading-row">Laddar...</div>
+        </div>
+      </div>
     </div>
 
   </div>
@@ -817,6 +824,11 @@ function currentDraw(product) { const dn = currentDrawNumber[product]; return dn
 function resultFor(product, drawNumber) { return (drawResultCache[product] || {})[drawNumber] || null; }
 function updatedFor(product, drawNumber) { return (drawUpdatedCache[product] || {})[drawNumber] || null; }
 let decodePreview = null; // { system_type, rows, draw_number, product } while reviewing an upload, before save
+// Synchronous re-entrancy guard for confirmDecodePreview() — checked/set before any await, so a
+// double-tap on "Spara kupong" (a slow multi-MB upload with no other feedback) can't fire a second
+// concurrent save. Caused a real bug: two concurrent saves each called advanceUploaderRotation(),
+// skipping a person's turn (see "Admin tab" in CLAUDE.md for the fix + admin correction tool).
+let decodePreviewSaving = false;
 let saveTimer = null;
 
 // ── INIT ──
@@ -1457,7 +1469,7 @@ function decodePreviewHtml() {
     <div style="margin-top:8px">${rowsHtml}</div>
     <div class="form-actions">
       <button class="btn btn-outline" onclick="cancelDecodePreview()">Avbryt</button>
-      <button class="btn btn-primary" onclick="confirmDecodePreview()">✓ Spara kupong</button>
+      <button class="btn btn-primary" id="save-decode-btn" ${decodePreviewSaving ? 'disabled' : ''} onclick="confirmDecodePreview()">${decodePreviewSaving ? '⏳ Sparar...' : '✓ Spara kupong'}</button>
     </div>
     ${p.imageUrl ? `
       <div style="padding:14px 16px;border-top:1px solid var(--border)">
@@ -1498,6 +1510,9 @@ function fileToBase64(file) {
   });
 }
 async function confirmDecodePreview() {
+  if (decodePreviewSaving) return; // already saving — ignore a double-tap
+  decodePreviewSaving = true;
+  render(); // shows the disabled/"⏳ Sparar..." button state immediately
   // Never create a second week for a product+draw_number that already has one — if a coupon
   // somehow already exists for this exact draw, saving upserts it in place instead of duplicating.
   const targetProduct = decodePreview.product || selectedProduct;
@@ -1530,12 +1545,17 @@ async function confirmDecodePreview() {
       advanceUploaderRotation();
       releaseDecodePreviewImage();
       decodePreview = null;
+      decodePreviewSaving = false;
       render();
       saveDataDebounced();
     } else {
+      decodePreviewSaving = false;
+      render();
       alert('Kunde inte spara: ' + (data.message || 'okänt fel'));
     }
   } catch (e) {
+    decodePreviewSaving = false;
+    render();
     alert('Kunde inte spara kupongen.');
     console.error(e);
   }
@@ -1775,8 +1795,47 @@ async function renderAdminOverview() {
         <span class="schedule-date"><input type="checkbox" ${u.goal_notifications_enabled ? 'checked' : ''} onchange="toggleGoalNotifications('${esc(u.username)}', this)"></span>
       </label>`).join('');
     }
+
+    const turnEl = document.getElementById('admin-uploader-turn-body');
+    if (turnEl) {
+      const rotation = state.uploader_rotation || [];
+      const currentUsername = rotation.length
+        ? rotation[(((state.uploader_rotation_index || 0) % rotation.length) + rotation.length) % rotation.length]
+        : null;
+      turnEl.innerHTML = `
+        <div class="form-row">
+          <label>Vem står på tur just nu?</label>
+          <select id="admin-uploader-turn-select">
+            ${(state.users || []).map(u => `<option value="${esc(u.username)}"${u.username === currentUsername ? ' selected' : ''}>${esc(u.display_name)}</option>`).join('')}
+          </select>
+        </div>
+        <button class="btn btn-primary" onclick="saveUploaderTurn()">Spara</button>
+        <div id="admin-uploader-turn-status" style="margin-top:10px;font-size:12px;color:var(--muted)"></div>
+      `;
+    }
   } catch (e) {
     body.innerHTML = `<div class="no-data"><div class="icon">⚠️</div><div>Kunde inte hämta admin-data.</div></div>`;
+  }
+}
+async function saveUploaderTurn() {
+  const session = getSession();
+  if (!session) return;
+  const select = document.getElementById('admin-uploader-turn-select');
+  const statusEl = document.getElementById('admin-uploader-turn-status');
+  if (!select || !statusEl) return;
+  statusEl.textContent = 'Sparar...';
+  try {
+    const r = await fetch('/api/admin/set-uploader-turn', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: session.username, target_username: select.value }),
+    });
+    const data = await r.json();
+    if (data.status !== 'ok') { statusEl.textContent = 'Fel: ' + (data.message || 'okänt fel'); return; }
+    state.uploader_rotation_index = (state.uploader_rotation || []).indexOf(select.value);
+    statusEl.textContent = 'Sparat ✓';
+    render();
+  } catch (e) {
+    statusEl.textContent = 'Kunde inte spara.';
   }
 }
 async function toggleGoalNotifications(targetUsername, checkbox) {
