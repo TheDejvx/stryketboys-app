@@ -787,40 +787,60 @@ def _active_draw_numbers(product):
             numbers.add(dn)
     return numbers
 
+# Diagnostic-only heartbeat, not persisted (in-memory, resets on restart) — added after a real
+# incident where every poller-driven push (first-match-started, goal notifications) silently
+# never fired despite live delivery being separately confirmed working, and there was no way to
+# tell from the app itself whether the poller thread was even still cycling at all, short of
+# Railway log access that wasn't reachable at the time. Same reasoning as the push-broadcast
+# `delivery` breakdown: make an otherwise-invisible failure mode checkable from the Admin tab.
+_poller_heartbeat = {'last_cycle_at': None, 'cycle_count': 0, 'last_error': None}
+
 def background_poller():
     time.sleep(5)
     while True:
-        any_live = False
-        for product in PRODUCTS:
-            try:
-                draw = fetch_draw(product)
-                if has_live_match(draw):
-                    any_live = True
-                draw_numbers = _active_draw_numbers(product)
-                current_dn = (draw or {}).get('draw_number')
-                if current_dn:
-                    draw_numbers.add(current_dn)
-                for dn in draw_numbers:
-                    d = draw if dn == current_dn else fetch_draw(product, draw_number=dn)
-                    if has_live_match(d):
-                        any_live = True
-                    if dn not in _result_cache[product]:
-                        fetch_result(product, dn)
-            except Exception as e:
-                print(f'Background poller error ({product}): {e}')
         try:
-            data = load_data()
-            notif_changed = check_first_match_notifications(data)
-            if check_settlement_notifications(data):
-                notif_changed = True
-            if check_upload_reminder_notifications(data):
-                notif_changed = True
-            if check_goal_notifications(data):
-                notif_changed = True
-            if notif_changed:
-                save_data(data)
+            any_live = False
+            for product in PRODUCTS:
+                try:
+                    draw = fetch_draw(product)
+                    if has_live_match(draw):
+                        any_live = True
+                    draw_numbers = _active_draw_numbers(product)
+                    current_dn = (draw or {}).get('draw_number')
+                    if current_dn:
+                        draw_numbers.add(current_dn)
+                    for dn in draw_numbers:
+                        d = draw if dn == current_dn else fetch_draw(product, draw_number=dn)
+                        if has_live_match(d):
+                            any_live = True
+                        if dn not in _result_cache[product]:
+                            fetch_result(product, dn)
+                except Exception as e:
+                    print(f'Background poller error ({product}): {e}')
+            try:
+                data = load_data()
+                notif_changed = check_first_match_notifications(data)
+                if check_settlement_notifications(data):
+                    notif_changed = True
+                if check_upload_reminder_notifications(data):
+                    notif_changed = True
+                if check_goal_notifications(data):
+                    notif_changed = True
+                if notif_changed:
+                    save_data(data)
+            except Exception as e:
+                print(f'Background poller notification check error: {e}')
+            _poller_heartbeat['last_cycle_at'] = datetime.now(timezone.utc).isoformat()
+            _poller_heartbeat['cycle_count'] += 1
+            _poller_heartbeat['last_error'] = None
         except Exception as e:
-            print(f'Background poller notification check error: {e}')
+            # Belt-and-suspenders: the two try/excepts above already cover everything expected to
+            # actually fail, but an uncaught exception anywhere in this loop would otherwise kill
+            # this thread permanently and silently — the rest of the app (logins, uploads, manual
+            # refresh) would keep working fine with nothing to indicate the poller had died. This
+            # outer catch means the loop always survives to the next sleep/cycle no matter what.
+            print(f'Background poller top-level error (thread would have died without this): {e}')
+            _poller_heartbeat['last_error'] = str(e)
         time.sleep(LIVE_POLL_SECONDS if any_live else IDLE_POLL_SECONDS)
 
 threading.Thread(target=background_poller, daemon=True).start()
@@ -1166,7 +1186,7 @@ def admin_overview():
         'push_subscription_count': len(u.get('push_subscriptions') or []),
         'goal_notifications_enabled': bool(u.get('goal_notifications_enabled')),
     } for u in data.get('users', [])]
-    return jsonify({'status': 'ok', 'users': users})
+    return jsonify({'status': 'ok', 'users': users, 'poller': _poller_heartbeat})
 
 @app.route('/api/admin/goal-notifications', methods=['POST'])
 def admin_goal_notifications():
