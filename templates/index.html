@@ -846,6 +846,10 @@ let decodePreview = null; // { system_type, rows, draw_number, product } while r
 // skipping a person's turn (see "Admin tab" in CLAUDE.md for the fix + admin correction tool).
 let decodePreviewSaving = false;
 let saveTimer = null;
+// Holds the raw File from a decode attempt that failed, so "Fyll i manuellt istället" (see
+// onCouponFileChosen()/startManualCouponEntry()) can still build a preview around it without
+// asking the user to pick the photo again.
+let lastFailedUploadFile = null;
 
 // ── INIT ──
 async function init() {
@@ -1438,7 +1442,8 @@ async function onCouponFileChosen(input) {
     const r = await fetch('/api/coupon/decode', { method: 'POST', body: formData });
     const data = await r.json();
     if (data.status !== 'ok') {
-      if (statusEl) statusEl.textContent = 'Fel: ' + (data.message || 'okänt fel');
+      lastFailedUploadFile = file;
+      if (statusEl) statusEl.innerHTML = `Fel: ${esc(data.message || 'okänt fel')}<br><button class="btn btn-outline" style="margin-top:8px" onclick="startManualCouponEntry()">✏️ Fyll i manuellt istället</button>`;
       if (btn) { btn.disabled = false; btn.textContent = '📤 Ladda upp kupong'; }
       return;
     }
@@ -1456,10 +1461,57 @@ async function onCouponFileChosen(input) {
     };
     render();
   } catch (e) {
-    if (statusEl) statusEl.textContent = 'Kunde inte analysera bilden.';
+    lastFailedUploadFile = file;
+    if (statusEl) statusEl.innerHTML = `Kunde inte analysera bilden.<br><button class="btn btn-outline" style="margin-top:8px" onclick="startManualCouponEntry()">✏️ Fyll i manuellt istället</button>`;
     if (btn) { btn.disabled = false; btn.textContent = '📤 Ladda upp kupong'; }
     console.error(e);
   }
+}
+
+// Lets the group proceed even when AI decode keeps failing (e.g. a sustained Gemini outage) —
+// asked for directly: the photo should still get uploaded and stored, with picks entered by hand
+// instead of blocking on a working decode. Reuses the exact same decodePreview/decodePreviewHtml()
+// editable-review flow a successful decode produces, just pre-filled differently: rather than
+// leaving every row blank (forcing the team names to be retyped by hand, error-prone and slow),
+// this pulls the real match list for this week's Stryktipset draw straight from already-cached
+// live draw data — team names, match_id and match_start all correct and guaranteed, since none of
+// that ever depended on the AI in the first place. Only the picks (the part decode was actually
+// for) are left for the user to tap in from the photo. Defaults to Stryktipset since that's the
+// only product the group actually plays (see UPLOAD_NUDGE_PRODUCTS/REMINDER_PRODUCTS elsewhere) —
+// falls back to blank freehand rows only if even that draw data isn't available.
+function startManualCouponEntry() {
+  const file = lastFailedUploadFile;
+  if (!file) return;
+  const product = 'stryktipset';
+  const draw = currentDraw(product);
+  const events = (draw && draw.events) ? [...draw.events].sort((a, b) => (a.row_num || 0) - (b.row_num || 0)) : [];
+  const rows = events.length ? events.map((ev, idx) => ({
+    row_num: ev.row_num || idx + 1,
+    home: ev.home || '',
+    away: ev.away || '',
+    match_id: ev.match_id ?? null,
+    match_start: ev.match_start || null,
+    kickoff_time: ev.match_start ? new Date(ev.match_start).toLocaleString('sv-SE', { weekday: 'short', hour: '2-digit', minute: '2-digit' }) : '',
+    picks: ['1'],
+    settled_result: null,
+    marked: false,
+  })) : Array.from({ length: 13 }, (_, idx) => ({
+    row_num: idx + 1, home: '', away: '', match_id: null, match_start: null, kickoff_time: '',
+    picks: ['1'], settled_result: null, marked: false,
+  }));
+  const session = getSession();
+  decodePreview = {
+    product,
+    system_type: 'Enkelrad',
+    rows,
+    draw_number: draw ? draw.draw_number : null,
+    uploaded_by: session ? session.display_name : nextUploader(),
+    uploaded_by_username: session ? session.username : null,
+    imageUrl: URL.createObjectURL(file),
+    imageFile: file,
+  };
+  lastFailedUploadFile = null;
+  render();
 }
 
 function decodePreviewHtml() {
