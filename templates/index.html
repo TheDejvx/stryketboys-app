@@ -1859,7 +1859,25 @@ async function renderAdminOverview() {
       if (goalNotifEl) goalNotifEl.innerHTML = '';
       return;
     }
-    body.innerHTML = data.users.map(u => {
+    // Surfaces the background poller's own heartbeat (last cycle time/count/error) — added after
+    // a real incident where every poller-driven push (first-match-started, goal notifications)
+    // silently never fired even though manual test broadcasts delivered fine, and there was no
+    // way to tell from the app whether the poller thread was still alive at all, short of Railway
+    // log access that wasn't reachable in the moment. Same "make it checkable from the Admin tab"
+    // reasoning as the push-broadcast delivery breakdown above.
+    const poller = data.poller || {};
+    const pollerAgeMin = poller.last_cycle_at ? Math.round((Date.now() - new Date(poller.last_cycle_at).getTime()) / 60000) : null;
+    const pollerStale = pollerAgeMin !== null && pollerAgeMin > 15; // well past even IDLE_POLL_SECONDS (10 min)
+    const pollerHtml = `<div class="schedule-row">
+      <span class="schedule-name">⚙️ Bakgrundsjobb</span>
+      <span class="schedule-date" style="${pollerStale || poller.last_error ? 'color:#c0392b' : ''}">
+        ${poller.last_cycle_at
+          ? `Senast körd ${esc(pollerAgeMin)} min sen (${poller.cycle_count} varv)${poller.last_error ? ' · fel: ' + esc(poller.last_error) : ''}`
+          : 'Har aldrig körts än'}
+      </span>
+    </div>`;
+
+    body.innerHTML = pollerHtml + data.users.map(u => {
       const loginStr = u.last_login
         ? new Date(u.last_login).toLocaleString('sv-SE', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })
         : 'Aldrig';
