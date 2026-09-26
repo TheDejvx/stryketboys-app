@@ -1290,15 +1290,30 @@ def get_data():
 def save():
     try:
         data = request.json
-        # never let a client-supplied blob overwrite stored password hashes —
-        # merge incoming users by username, keeping the existing hash unless
-        # /api/change-password explicitly updates it.
+        # Never let a client-supplied blob overwrite a field it structurally never had in the
+        # first place. public_data() (the shape GET /api/data actually sends the client) strips
+        # password_hash, push_subscriptions and goal_notifications_enabled before the client ever
+        # sees them — so state.users on every browser is permanently missing all three, and every
+        # ordinary /api/save call (this is not a rare path: any settled_result tap, any coupon
+        # save's saveDataDebounced(), etc. hits it) was blindly overwriting data['users'] wholesale
+        # with that incomplete copy, silently erasing push_subscriptions and
+        # goal_notifications_enabled for every user on every such save. Real symptom that surfaced
+        # this: David's goal-notification toggle looking like it needed "reactivating" every
+        # week — it wasn't drifting back off on its own, this endpoint was deleting it outright on
+        # the very next unrelated save. Very likely a real contributor to the repeated
+        # push-subscription flakiness chased at length elsewhere in this file's history too — the
+        # subscription was probably never going stale browser/push-service-side nearly as often as
+        # it looked. Merge in the existing stored value for any of these three fields the incoming
+        # payload doesn't include, same pattern as the pre-existing password_hash-only merge below.
         existing = load_data()
         existing_users = {u['username']: u for u in existing.get('users', [])}
         for u in data.get('users', []):
             prior = existing_users.get(u.get('username'))
-            if prior and 'password_hash' not in u:
-                u['password_hash'] = prior['password_hash']
+            if not prior:
+                continue
+            for field in ('password_hash', 'push_subscriptions', 'goal_notifications_enabled'):
+                if field not in u and field in prior:
+                    u[field] = prior[field]
         save_data(data)
         return jsonify({'status': 'ok'})
     except Exception as e:
