@@ -925,6 +925,26 @@ def fuzzy_match_event(home, away, events):
             best, best_score = ev, score
     return best, best_score
 
+# Gemini occasionally returns a transient 503 ("This model is currently experiencing high
+# demand... usually temporary") or 429 (rate limit) — both explicitly say to just retry, but
+# decode_coupon() used to surface the raw error straight to the user on the very first failure,
+# forcing a manual re-upload of the same photo for something that often clears up in seconds.
+# Retries only on the retryable 5xx/429 codes — a real problem (bad API key, malformed request)
+# fails immediately as before, not after wasting time retrying something that'll never succeed.
+def _generate_content_with_retry(client, **kwargs):
+    from google.genai import errors as genai_errors
+    delays = (2, 5, 10)
+    for attempt, delay in enumerate((0,) + delays):
+        if delay:
+            print(f'decode_coupon: retrying Gemini call in {delay}s (attempt {attempt + 1})')
+            time.sleep(delay)
+        try:
+            return client.models.generate_content(**kwargs)
+        except genai_errors.APIError as e:
+            if e.code not in (429, 500, 503, 504) or attempt == len(delays):
+                raise
+            print(f'decode_coupon: Gemini call failed with {e.code} {e.status} — will retry')
+
 @app.route('/api/coupon/decode', methods=['POST'])
 def decode_coupon():
     client = get_gemini()
@@ -958,7 +978,8 @@ def decode_coupon():
         # frontend always shows it as an editable preview (with the original photo visible
         # alongside it) rather than expecting a perfect unassisted read.
         from google.genai import types as genai_types
-        resp = client.models.generate_content(
+        resp = _generate_content_with_retry(
+            client,
             model='gemini-3.5-flash',
             contents=[
                 build_describe_prompt(expected_rows),
