@@ -929,21 +929,48 @@ def fuzzy_match_event(home, away, events):
 # demand... usually temporary") or 429 (rate limit) — both explicitly say to just retry, but
 # decode_coupon() used to surface the raw error straight to the user on the very first failure,
 # forcing a manual re-upload of the same photo for something that often clears up in seconds.
-# Retries only on the retryable 5xx/429 codes — a real problem (bad API key, malformed request)
-# fails immediately as before, not after wasting time retrying something that'll never succeed.
+#
+# On top of retrying, this also falls through to a different model entirely if the first one
+# keeps failing — asked for directly after a real 503 report, since a demand spike can hit one
+# specific model ID without affecting others. gemini-3.5-flash stays first/primary: it's the one
+# specifically confirmed (after 10 rounds of testing — see "Coupon decode flow" in CLAUDE.md) to
+# actually read the pill grid correctly, so falling back away from it should only kick in when
+# it's genuinely unavailable, not swap it out by default. The fallback IDs below are a best-effort
+# guess at what's currently on the free tier, NOT independently verified against the live API the
+# way gemini-3.5-flash itself was (that took a standalone test script against the real key) — same
+# "trust the live API error over docs" caveat as always in this file. Check server logs after this
+# ships to see which model (if any) actually ends up answering, and correct the list if needed.
+DECODE_MODEL_FALLBACKS = ('gemini-3.5-flash', 'gemini-flash-latest', 'gemini-2.5-flash')
+
 def _generate_content_with_retry(client, **kwargs):
     from google.genai import errors as genai_errors
-    delays = (2, 5, 10)
-    for attempt, delay in enumerate((0,) + delays):
-        if delay:
-            print(f'decode_coupon: retrying Gemini call in {delay}s (attempt {attempt + 1})')
-            time.sleep(delay)
-        try:
-            return client.models.generate_content(**kwargs)
-        except genai_errors.APIError as e:
-            if e.code not in (429, 500, 503, 504) or attempt == len(delays):
-                raise
-            print(f'decode_coupon: Gemini call failed with {e.code} {e.status} — will retry')
+    # Shorter per-model backoff than a single-model retry would use (2s/5s, not up to 3 rounds) —
+    # with up to 3 models to fall through to as well now, giving each one the full 2/5/10s ladder
+    # would risk a worst case well over a minute before ever reaching the last candidate.
+    delays = (2, 5)
+    last_error = None
+    for model in DECODE_MODEL_FALLBACKS:
+        for attempt, delay in enumerate((0,) + delays):
+            if delay:
+                print(f'decode_coupon: retrying {model} in {delay}s (attempt {attempt + 1})')
+                time.sleep(delay)
+            try:
+                resp = client.models.generate_content(model=model, **kwargs)
+                if model != DECODE_MODEL_FALLBACKS[0]:
+                    print(f'decode_coupon: fell back to {model} successfully')
+                return resp
+            except genai_errors.APIError as e:
+                last_error = e
+                if e.code == 404:
+                    # Model doesn't exist / isn't available to this key — no point retrying it,
+                    # move straight to the next candidate.
+                    print(f'decode_coupon: {model} unavailable (404) — trying next model')
+                    break
+                if e.code not in (429, 500, 503, 504) or attempt == len(delays):
+                    print(f'decode_coupon: {model} failed with {e.code} {e.status} — trying next model')
+                    break
+                print(f'decode_coupon: {model} failed with {e.code} {e.status} — will retry')
+    raise last_error
 
 @app.route('/api/coupon/decode', methods=['POST'])
 def decode_coupon():
@@ -980,7 +1007,6 @@ def decode_coupon():
         from google.genai import types as genai_types
         resp = _generate_content_with_retry(
             client,
-            model='gemini-3.5-flash',
             contents=[
                 build_describe_prompt(expected_rows),
                 genai_types.Part.from_bytes(data=img_bytes, mime_type=media_type),
