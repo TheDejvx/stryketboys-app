@@ -410,6 +410,12 @@ body {
         </div>
       </div>
       <div class="card">
+        <div class="card-header"><h2>💰 Insatser &amp; vinster</h2></div>
+        <div class="card-body" id="totals-body">
+          <div class="loading-row">Laddar...</div>
+        </div>
+      </div>
+      <div class="card">
         <div class="card-header"><h2>🕐 Senaste resultat</h2></div>
         <div id="recent-results-body">
           <div class="loading-row">Laddar...</div>
@@ -1765,6 +1771,58 @@ function settledWeeksSorted() {
     .sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
 }
 
+// A fully-settled week's own kronor payout, matched against its own correct count — reads
+// week.official_result directly (persisted server-side once Svenska Spel finalizes it, see
+// _persist_official_result() in app.py), not resultFor()/drawResultCache, since the latter only
+// ever gets populated for whatever draws happen to be actively polled or individually expanded
+// in Historik — an aggregate across the *whole* history needs every week's own stored copy, which
+// travels along with state.weeks on every normal /api/data load regardless of polling state.
+// null means "don't know yet" (not settled, or Svenska Spel hasn't published the payout yet) —
+// distinct from 0, a real "no win this round" result.
+function weekPayout(week) {
+  if (!isWeekFullySettled(week)) return null;
+  const result = week.official_result;
+  if (!result || !result.distribution) return null;
+  const { correct } = weekTally(week);
+  const tier = result.distribution.find(t => t.correct === correct);
+  return tier ? (tier.amount || 0) : 0;
+}
+function renderTotals() {
+  const el = document.getElementById('totals-body');
+  if (!el) return;
+  const weeks = state.weeks || [];
+  const settled = weeks.filter(isWeekFullySettled);
+  let totalWon = 0, knownPayouts = 0;
+  const byUploader = {};
+  weeks.forEach(w => {
+    const payout = weekPayout(w);
+    if (payout === null) return;
+    knownPayouts++;
+    totalWon += payout;
+    const name = w.uploaded_by || '–';
+    byUploader[name] = (byUploader[name] || 0) + payout;
+  });
+  let topName = null, topAmount = -1;
+  Object.keys(byUploader).forEach(name => {
+    if (byUploader[name] > topAmount) { topAmount = byUploader[name]; topName = name; }
+  });
+  el.innerHTML = `
+    <div style="display:flex;gap:16px;flex-wrap:wrap">
+      <div class="stat-card" style="flex:1;min-width:140px">
+        <div class="stat-label">Totalt bettat</div>
+        <div class="stat-value">${weeks.length} st</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:2px">kupong(er) spelade totalt</div>
+      </div>
+      <div class="stat-card" style="flex:1;min-width:140px">
+        <div class="stat-label">Totalt inspelat</div>
+        <div class="stat-value">${fmtKr(totalWon)}</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:2px">${knownPayouts}/${settled.length} avgjorda kupong(er) har känd utdelning</div>
+      </div>
+    </div>
+    ${topName ? `<div style="margin-top:12px;font-size:13px">🥇 <b>${esc(topName)}</b> har spelat in mest: ${fmtKr(topAmount)}</div>` : ''}
+  `;
+}
+
 function renderGroupAverage() {
   const el = document.getElementById('group-average-body');
   const weeks = settledWeeksSorted();
@@ -1843,6 +1901,7 @@ function renderPerfectWeeks() {
 }
 
 function renderStats() {
+  renderTotals();
   renderGroupAverage();
   renderRecentResults();
   renderMarathon();

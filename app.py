@@ -547,6 +547,42 @@ def current_draw(product):
 # product can be relevant at once (an older still-active week alongside a newer open one).
 _result_cache = {p: {} for p in PRODUCTS}
 
+def _persist_official_result(product, draw_number, result):
+    """Once Svenska Spel finalizes a result, it never changes again — so once fetched, it's
+    written onto the matching week(s) in the real data store, not just kept in the in-memory
+    _result_cache (which is wiped by every redeploy, forcing a re-fetch from Svenska Spel for no
+    reason). Asked for directly: avoid re-hitting Svenska Spel for a result we already have."""
+    try:
+        data = load_data()
+        changed = False
+        for w in data.get('weeks', []):
+            if w.get('product', 'stryktipset') == product and w.get('draw_number') == draw_number:
+                if w.get('official_result') != result:
+                    w['official_result'] = result
+                    changed = True
+        if changed:
+            save_data(data)
+    except Exception as e:
+        print(f'_persist_official_result error ({product}, draw {draw_number}): {e}')
+
+def _warm_result_cache_from_storage():
+    """Pre-loads _result_cache from whatever's already persisted on weeks (see
+    _persist_official_result()) at process start, so GET /api/draw can answer with a result
+    immediately after a redeploy instead of waiting for the next background_poller() cycle to
+    re-derive something that was already known before the restart."""
+    try:
+        data = load_data()
+        for w in data.get('weeks', []):
+            result = w.get('official_result')
+            dn = w.get('draw_number')
+            product = w.get('product', 'stryktipset')
+            if result and dn and product in PRODUCTS:
+                _result_cache[product][dn] = result
+    except Exception as e:
+        print(f'_warm_result_cache_from_storage error: {e}')
+
+_warm_result_cache_from_storage()
+
 def fetch_result(product, draw_number):
     """Once Svenska Spel fully finalizes a draw (all matches done + verified — this can lag
     kickoff-to-kickoff by hours), a dedicated /result endpoint appears with the official 1/X/2
@@ -556,6 +592,8 @@ def fetch_result(product, draw_number):
     if product not in PRODUCTS or not draw_number:
         return None
     cached = _result_cache[product].get(draw_number)
+    if cached:
+        return cached
     import requests as req
     try:
         r = req.get(f'https://api.spela.svenskaspel.se/draw/1/{product}/draws/{draw_number}/result',
@@ -593,6 +631,7 @@ def fetch_result(product, draw_number):
             'distribution': distribution,
         }
         print(f"{product}: fetched final result for draw {draw_number} ({len(outcomes)} outcomes, {len(distribution)} payout tiers)")
+        _persist_official_result(product, draw_number, _result_cache[product][draw_number])
     except Exception as e:
         print(f'Result fetch error ({product}, draw {draw_number}): {e}')
         return cached
@@ -832,6 +871,20 @@ _poller_heartbeat = {'last_cycle_at': None, 'cycle_count': 0, 'last_error': None
 
 def background_poller():
     time.sleep(5)
+    # One-time catch-up at process start: any already-fully-settled week, regardless of age,
+    # whose official result/payout was never fetched (e.g. because it settled before the
+    # time-bounded polling in _draw_numbers_awaiting_result() even existed) gets one fetch
+    # attempt now — deliberately unbounded by RESULT_POLL_WINDOW_DAYS, since this only ever runs
+    # once per process start, not every cycle, so it can't become an ever-growing indefinite poll.
+    try:
+        for w in load_data().get('weeks', []):
+            if w.get('official_result'):
+                continue
+            rows = w.get('rows') or []
+            if rows and all(r.get('settled_result') for r in rows):
+                fetch_result(w.get('product', 'stryktipset'), w.get('draw_number'))
+    except Exception as e:
+        print(f'Background poller startup result backfill error: {e}')
     while True:
         try:
             any_live = False
