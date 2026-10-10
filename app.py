@@ -1319,6 +1319,29 @@ def admin_set_uploader_turn():
     save_data(data)
     return jsonify({'status': 'ok'})
 
+@app.route('/api/admin/reset-password', methods=['POST'])
+def admin_reset_password():
+    """Lets David reset someone's password directly when they're locked out (e.g. still on the
+    original seed password but typing it with the wrong case, or having just forgotten it) —
+    without needing seed_users.py, which would reset *everyone's* password at once. Sets
+    must_change_password back to True, same as a fresh seed account, so a reset password is
+    always a temporary one the person is nudged to replace with something only they know on their
+    next login — not a permanent shared secret sitting in chat history."""
+    payload = request.json or {}
+    requester, data = _require_admin(payload.get('username'))
+    if not requester:
+        return jsonify({'status': 'error', 'message': 'Forbidden'}), 403
+    target = find_user(data, payload.get('target_username'))
+    if not target:
+        return jsonify({'status': 'error', 'message': 'Okänd användare'}), 404
+    new_password = (payload.get('new_password') or '').strip()
+    if not new_password:
+        return jsonify({'status': 'error', 'message': 'Nytt lösenord krävs'}), 400
+    target['password_hash'] = generate_password_hash(new_password)
+    target['must_change_password'] = True
+    save_data(data)
+    return jsonify({'status': 'ok'})
+
 @app.route('/api/admin/push-broadcast', methods=['POST'])
 def admin_push_broadcast():
     payload = request.json or {}

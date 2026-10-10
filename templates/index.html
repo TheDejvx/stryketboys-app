@@ -483,6 +483,13 @@ body {
           <div class="loading-row">Laddar...</div>
         </div>
       </div>
+      <div class="card">
+        <div class="card-header"><h2>🔑 Återställ lösenord</h2></div>
+        <div style="font-size:11px;color:var(--muted);padding:0 16px 8px">Om någon är utelåst (t.ex. fastnat på startlösenordet). Den återställda personen måste byta lösenord nästa gång de loggar in, precis som ett nytt konto.</div>
+        <div class="card-body" id="admin-reset-password-body">
+          <div class="loading-row">Laddar...</div>
+        </div>
+      </div>
     </div>
 
   </div>
@@ -1991,6 +1998,24 @@ async function renderAdminOverview() {
         <div id="admin-uploader-turn-status" style="margin-top:10px;font-size:12px;color:var(--muted)"></div>
       `;
     }
+
+    const resetEl = document.getElementById('admin-reset-password-body');
+    if (resetEl) {
+      resetEl.innerHTML = `
+        <div class="form-row">
+          <label>Vem?</label>
+          <select id="admin-reset-password-select">
+            ${(state.users || []).map(u => `<option value="${esc(u.username)}">${esc(u.display_name)}</option>`).join('')}
+          </select>
+        </div>
+        <div class="form-row">
+          <label>Nytt lösenord</label>
+          <input type="text" id="admin-reset-password-value" placeholder="t.ex. gustav123">
+        </div>
+        <button class="btn btn-primary" onclick="resetUserPassword()">Återställ</button>
+        <div id="admin-reset-password-status" style="margin-top:10px;font-size:12px;color:var(--muted)"></div>
+      `;
+    }
   } catch (e) {
     body.innerHTML = `<div class="no-data"><div class="icon">⚠️</div><div>Kunde inte hämta admin-data.</div></div>`;
   }
@@ -2014,6 +2039,28 @@ async function saveUploaderTurn() {
     render();
   } catch (e) {
     statusEl.textContent = 'Kunde inte spara.';
+  }
+}
+async function resetUserPassword() {
+  const session = getSession();
+  if (!session) return;
+  const select = document.getElementById('admin-reset-password-select');
+  const input = document.getElementById('admin-reset-password-value');
+  const statusEl = document.getElementById('admin-reset-password-status');
+  if (!select || !input || !statusEl) return;
+  if (!input.value.trim()) { statusEl.textContent = 'Skriv ett nytt lösenord först.'; return; }
+  statusEl.textContent = 'Återställer...';
+  try {
+    const r = await fetch('/api/admin/reset-password', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: session.username, target_username: select.value, new_password: input.value.trim() }),
+    });
+    const data = await r.json();
+    if (data.status !== 'ok') { statusEl.textContent = 'Fel: ' + (data.message || 'okänt fel'); return; }
+    statusEl.textContent = `Lösenord återställt för ${select.options[select.selectedIndex].text} ✓ (måste byta lösenord vid nästa inloggning)`;
+    input.value = '';
+  } catch (e) {
+    statusEl.textContent = 'Kunde inte återställa.';
   }
 }
 async function toggleGoalNotifications(targetUsername, checkbox) {
