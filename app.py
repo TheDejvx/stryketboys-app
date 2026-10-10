@@ -1,6 +1,6 @@
 from flask import Flask, render_template, jsonify, request, Response
 import json, os, re, threading, time, base64, io
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from difflib import SequenceMatcher
 from werkzeug.security import generate_password_hash, check_password_hash
 from PIL import Image
@@ -787,6 +787,41 @@ def _active_draw_numbers(product):
             numbers.add(dn)
     return numbers
 
+RESULT_POLL_WINDOW_DAYS = 21
+# A week falls out of _active_draw_numbers() the moment every row has a *score-derived*
+# settled_result — which happens right at full-time, well before Svenska Spel actually finalizes
+# the official result/payout (that can lag kickoff by hours, sometimes into the next day — see
+# fetch_result()). Once a week drops out of "active", background_poller() stops calling
+# fetch_result() for its draw_number entirely — so if the payout genuinely wasn't published yet at
+# that exact moment, it would simply never get fetched again, ever, even once Svenska Spel does
+# publish it. Real symptom: a 12-rätt week's payout missing from Historik days later. This
+# separately tracks draw_numbers whose payout we still don't have cached, for any week recent
+# enough that one might plausibly still be coming (bounded, not forever, so a draw Svenska Spel
+# never finalizes — e.g. a cancelled/void round — doesn't get polled indefinitely years later).
+def _draw_numbers_awaiting_result(product):
+    try:
+        weeks = load_data().get('weeks', [])
+    except Exception as e:
+        print(f'_draw_numbers_awaiting_result error ({product}): {e}')
+        return set()
+    cutoff = datetime.now(timezone.utc) - timedelta(days=RESULT_POLL_WINDOW_DAYS)
+    numbers = set()
+    for w in weeks:
+        if w.get('product', 'stryktipset') != product:
+            continue
+        dn = w.get('draw_number')
+        if not dn or dn in _result_cache[product]:
+            continue
+        created = w.get('created_at')
+        try:
+            created_dt = datetime.fromisoformat(created) if created else None
+        except Exception:
+            created_dt = None
+        if created_dt and created_dt < cutoff:
+            continue
+        numbers.add(dn)
+    return numbers
+
 # Diagnostic-only heartbeat, not persisted (in-memory, resets on restart) — added after a real
 # incident where every poller-driven push (first-match-started, goal notifications) silently
 # never fired despite live delivery being separately confirmed working, and there was no way to
@@ -815,6 +850,12 @@ def background_poller():
                             any_live = True
                         if dn not in _result_cache[product]:
                             fetch_result(product, dn)
+                    # Weeks whose rows are all score-settled (so no longer in draw_numbers above,
+                    # no need to refresh their draw data) but whose official payout hasn't shown
+                    # up yet still need polling for that specifically — see
+                    # _draw_numbers_awaiting_result()'s own comment for why this is separate.
+                    for dn in _draw_numbers_awaiting_result(product) - draw_numbers:
+                        fetch_result(product, dn)
                 except Exception as e:
                     print(f'Background poller error ({product}): {e}')
             try:
