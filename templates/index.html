@@ -1661,8 +1661,23 @@ function deleteWeek(weekId) {
 // ── HISTORIK ──
 let expandedWeeks = new Set();
 function toggleWeekDetail(weekId) {
-  if (expandedWeeks.has(weekId)) expandedWeeks.delete(weekId); else expandedWeeks.add(weekId);
+  if (expandedWeeks.has(weekId)) {
+    expandedWeeks.delete(weekId);
+    renderHistory();
+    return;
+  }
+  expandedWeeks.add(weekId);
   renderHistory();
+  // A fully-settled week is deliberately excluded from the regular polling set (see
+  // neededDraws()) — no reason to keep fetching a draw that's fully decided. But that means its
+  // official payout, which can take hours longer to finalize than the matches themselves, might
+  // never have been loaded client-side even once the backend actually has it cached. Fetch it
+  // on demand right when a week gets expanded, but only if we don't already have a result for it
+  // — cheap, and makes an already-settled week's payout show up without needing a full reload.
+  const week = weekById(weekId);
+  if (week && !resultFor(week.product || 'stryktipset', week.draw_number)) {
+    loadDraw(week.product || 'stryktipset', week.draw_number);
+  }
 }
 function weekTally(week) {
   let correct = 0, total = 0;
