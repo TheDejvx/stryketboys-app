@@ -412,8 +412,8 @@ def check_matchday_reminder_notifications(data):
     calendar day its current draw's betting closes) — unlike the upload-reminder tiers above,
     this isn't gated on whether a coupon's been uploaded yet. Goes to everyone with push enabled
     (a plain broadcast_push() call already only reaches users with a stored subscription) —
-    whoever's on the upload rotation is only named in the text, not specially targeted. One-shot
-    per draw_number via data['matchday_reminder_sent']."""
+    whoever's named in the text is not specially targeted. One-shot per draw_number via
+    data['matchday_reminder_sent']."""
     draw = current_draw('stryktipset')
     if not draw or not draw.get('draw_number') or not draw.get('reg_close_time'):
         return False
@@ -431,13 +431,28 @@ def check_matchday_reminder_notifications(data):
     if now_local.date() != close_local.date() or now_local < fire_at:
         return False
 
-    rotation = data.get('uploader_rotation') or []
-    name = None
-    if rotation:
-        idx = data.get('uploader_rotation_index', 0) % len(rotation)
-        user = find_user(data, rotation[idx])
-        name = user.get('display_name') if user else None
-    name = name or 'Någon'
+    # Bug fixed: named the WRONG person whenever today's coupon had already been uploaded
+    # before 14:00. uploader_rotation_index advances the instant a coupon is saved
+    # (advanceUploaderRotation()), so a plain rotation[idx] lookup here was reading who's up
+    # NEXT, not who actually uploaded today's coupon — same root cause already fixed once for
+    # renderUploaderSchedule()'s "today" row (see Data model notes). Fix: if today's draw
+    # already has a coupon, name its actual uploader (week.uploaded_by) instead of the
+    # rotation pointer, which only still reflects "today" while nobody's uploaded yet.
+    existing_week = next(
+        (w for w in data.get('weeks', [])
+         if w.get('product', 'stryktipset') == 'stryktipset' and w.get('draw_number') == draw_number),
+        None,
+    )
+    if existing_week and existing_week.get('uploaded_by'):
+        name = existing_week['uploaded_by']
+    else:
+        rotation = data.get('uploader_rotation') or []
+        name = None
+        if rotation:
+            idx = data.get('uploader_rotation_index', 0) % len(rotation)
+            user = find_user(data, rotation[idx])
+            name = user.get('display_name') if user else None
+        name = name or 'Någon'
 
     sent.append(draw_number)
     title, body_template = MATCHDAY_REMINDER_VARIANTS[draw_number % len(MATCHDAY_REMINDER_VARIANTS)]
