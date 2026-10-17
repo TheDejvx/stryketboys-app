@@ -1,12 +1,17 @@
 from flask import Flask, render_template, jsonify, request, Response
 import json, os, re, threading, time, base64, io
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 from difflib import SequenceMatcher
 from werkzeug.security import generate_password_hash, check_password_hash
 from PIL import Image
 
 app = Flask(__name__)
 DATA_FILE = os.path.join(os.path.dirname(__file__), 'stryk_data.json')
+# Sweden's UTC offset moves with DST (CEST/CET) across the season, so the matchday reminder
+# below (the one place in this file comparing against a real local wall-clock time, rather than
+# UTC or a pre-parsed ISO timestamp) needs an actual timezone, not a fixed offset.
+STOCKHOLM_TZ = ZoneInfo('Europe/Stockholm')
 
 @app.after_request
 def add_sw_scope_header(response):
@@ -388,6 +393,61 @@ def check_upload_reminder_notifications(data):
                 tag=f'reminder-1h-{key}',
             )
     return changed
+
+# One nudge text per week, picked off draw_number rather than randomly — asked for directly
+# ("du får gärna byta lite vad man skriver varje vecka") so the matchday reminder below doesn't
+# read as the exact same canned line every single round, while still being the same deterministic
+# choice if a cycle happens to check twice around the trigger moment.
+MATCHDAY_REMINDER_VARIANTS = (
+    ('🔥 Nu närmar det sig!', '13 idag — {name} har kupongen på sitt bord!'),
+    ('⏳ Strax avspark!', 'Stryktipset kör idag — {name} fixar kupongen åt oss!'),
+    ('📢 Dagens påminnelse', '13 matcher idag, {name} har koll på läget!'),
+    ('🎯 Snart smäller det!', 'Matchdag! {name} har ordnat dagens kupong.'),
+    ('⚽ Idag är det dags!', '13 rätt väntar — tack {name} för kupongen!'),
+    ('🔥 Helgens stora dag!', 'Stryktipset idag — {name} håller i kupongen!'),
+)
+
+def check_matchday_reminder_notifications(data):
+    """Fires one broadcast push at 14:00 Swedish local time on Stryktipset's match day (the same
+    calendar day its current draw's betting closes) — unlike the upload-reminder tiers above,
+    this isn't gated on whether a coupon's been uploaded yet. Goes to everyone with push enabled
+    (a plain broadcast_push() call already only reaches users with a stored subscription) —
+    whoever's on the upload rotation is only named in the text, not specially targeted. One-shot
+    per draw_number via data['matchday_reminder_sent']."""
+    draw = current_draw('stryktipset')
+    if not draw or not draw.get('draw_number') or not draw.get('reg_close_time'):
+        return False
+    draw_number = draw['draw_number']
+    sent = data.setdefault('matchday_reminder_sent', [])
+    if draw_number in sent:
+        return False
+    try:
+        close_time = datetime.fromisoformat(draw['reg_close_time'].replace('Z', '+00:00'))
+    except Exception:
+        return False
+    close_local = close_time.astimezone(STOCKHOLM_TZ)
+    now_local = datetime.now(timezone.utc).astimezone(STOCKHOLM_TZ)
+    fire_at = close_local.replace(hour=14, minute=0, second=0, microsecond=0)
+    if now_local.date() != close_local.date() or now_local < fire_at:
+        return False
+
+    rotation = data.get('uploader_rotation') or []
+    name = None
+    if rotation:
+        idx = data.get('uploader_rotation_index', 0) % len(rotation)
+        user = find_user(data, rotation[idx])
+        name = user.get('display_name') if user else None
+    name = name or 'Någon'
+
+    sent.append(draw_number)
+    title, body_template = MATCHDAY_REMINDER_VARIANTS[draw_number % len(MATCHDAY_REMINDER_VARIANTS)]
+    broadcast_push(
+        data,
+        title=title,
+        body=body_template.format(name=name),
+        tag=f'matchday-reminder-{draw_number}',
+    )
+    return True
 
 def public_data(data):
     """Strip password hashes before this ever reaches the client. last_login rides along here
@@ -917,6 +977,8 @@ def background_poller():
                 if check_settlement_notifications(data):
                     notif_changed = True
                 if check_upload_reminder_notifications(data):
+                    notif_changed = True
+                if check_matchday_reminder_notifications(data):
                     notif_changed = True
                 if check_goal_notifications(data):
                     notif_changed = True
