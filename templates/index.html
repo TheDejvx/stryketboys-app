@@ -484,6 +484,13 @@ body {
         </div>
       </div>
       <div class="card">
+        <div class="card-header"><h2>🔀 Byt plats i rotationen</h2></div>
+        <div style="font-size:11px;color:var(--muted);padding:0 16px 8px">För en tillfällig byte av ordning (t.ex. "jag och Victor byter bara denna omgång") — tryck Byt igen med samma två personer för att återställa ordningen efteråt</div>
+        <div class="card-body" id="admin-swap-turn-body">
+          <div class="loading-row">Laddar...</div>
+        </div>
+      </div>
+      <div class="card">
         <div class="card-header"><h2>🔑 Återställ lösenord</h2></div>
         <div style="font-size:11px;color:var(--muted);padding:0 16px 8px">Om någon är utelåst (t.ex. fastnat på startlösenordet). Den återställda personen måste byta lösenord nästa gång de loggar in, precis som ett nytt konto.</div>
         <div class="card-body" id="admin-reset-password-body">
@@ -1999,6 +2006,23 @@ async function renderAdminOverview() {
       `;
     }
 
+    const swapEl = document.getElementById('admin-swap-turn-body');
+    if (swapEl) {
+      const userOptions = (state.users || []).map(u => `<option value="${esc(u.username)}">${esc(u.display_name)}</option>`).join('');
+      swapEl.innerHTML = `
+        <div class="form-row">
+          <label>Person A</label>
+          <select id="admin-swap-turn-a">${userOptions}</select>
+        </div>
+        <div class="form-row">
+          <label>Person B</label>
+          <select id="admin-swap-turn-b">${userOptions}</select>
+        </div>
+        <button class="btn btn-primary" onclick="swapUploaderTurn()">Byt</button>
+        <div id="admin-swap-turn-status" style="margin-top:10px;font-size:12px;color:var(--muted)"></div>
+      `;
+    }
+
     const resetEl = document.getElementById('admin-reset-password-body');
     if (resetEl) {
       resetEl.innerHTML = `
@@ -2039,6 +2063,29 @@ async function saveUploaderTurn() {
     render();
   } catch (e) {
     statusEl.textContent = 'Kunde inte spara.';
+  }
+}
+async function swapUploaderTurn() {
+  const session = getSession();
+  if (!session) return;
+  const selectA = document.getElementById('admin-swap-turn-a');
+  const selectB = document.getElementById('admin-swap-turn-b');
+  const statusEl = document.getElementById('admin-swap-turn-status');
+  if (!selectA || !selectB || !statusEl) return;
+  if (selectA.value === selectB.value) { statusEl.textContent = 'Välj två olika personer.'; return; }
+  statusEl.textContent = 'Byter...';
+  try {
+    const r = await fetch('/api/admin/swap-uploader-turn', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: session.username, user_a: selectA.value, user_b: selectB.value }),
+    });
+    const data = await r.json();
+    if (data.status !== 'ok') { statusEl.textContent = 'Fel: ' + (data.message || 'okänt fel'); return; }
+    state.uploader_rotation = data.uploader_rotation;
+    statusEl.textContent = 'Bytt ✓';
+    render();
+  } catch (e) {
+    statusEl.textContent = 'Kunde inte byta.';
   }
 }
 async function resetUserPassword() {

@@ -1396,6 +1396,40 @@ def admin_set_uploader_turn():
     save_data(data)
     return jsonify({'status': 'ok'})
 
+@app.route('/api/admin/swap-uploader-turn', methods=['POST'])
+def admin_swap_uploader_turn():
+    """Swaps two people's fixed positions in uploader_rotation (the pointer/index is untouched) —
+    for a one-off 'we're trading turns this round' request (asked for directly: David and Victor
+    swapping for a single round, then back to normal). Unlike set-uploader-turn above, which just
+    moves the pointer to whoever's turn it should be *right now*, a plain pointer move would skip
+    or double someone's turn here: advanceUploaderRotation() always walks the array in fixed
+    order, so if David's slot (say index 2) is skipped past onto Victor's (index 3) without the
+    array itself changing, the person normally after Victor comes up too early and everyone after
+    them in the list drifts permanently — not just for this round. Swapping the two array slots
+    instead means whoever's turn is active right now simply becomes the other person, and the
+    walk continues exactly as before through everyone else once both have gone. Calling this same
+    endpoint with the same two usernames a second time (e.g. after the swapped-in person's round
+    is done) swaps them right back, since a swap is its own inverse — no separate 'undo' endpoint
+    needed."""
+    payload = request.json or {}
+    requester, data = _require_admin(payload.get('username'))
+    if not requester:
+        return jsonify({'status': 'error', 'message': 'Forbidden'}), 403
+    rotation = data.get('uploader_rotation') or []
+    user_a = (payload.get('user_a') or '').strip().lower()
+    user_b = (payload.get('user_b') or '').strip().lower()
+    if user_a == user_b:
+        return jsonify({'status': 'error', 'message': 'Välj två olika personer'}), 400
+    try:
+        idx_a = rotation.index(user_a)
+        idx_b = rotation.index(user_b)
+    except ValueError:
+        return jsonify({'status': 'error', 'message': 'Okänt användarnamn i rotationen'}), 400
+    rotation[idx_a], rotation[idx_b] = rotation[idx_b], rotation[idx_a]
+    data['uploader_rotation'] = rotation
+    save_data(data)
+    return jsonify({'status': 'ok', 'uploader_rotation': rotation})
+
 @app.route('/api/admin/reset-password', methods=['POST'])
 def admin_reset_password():
     """Lets David reset someone's password directly when they're locked out (e.g. still on the
