@@ -489,6 +489,48 @@ def check_matchday_reminder_notifications(data):
     )
     return True
 
+def next_scheduled_pushes(data):
+    """Best-effort preview of upcoming *time-based* automatic pushes (matchday reminder, the
+    upload-reminder tiers) for the Admin tab's "När går nästa push ut?" line — asked for directly.
+    The other three automatic triggers (first match started, fully settled, goal notifications)
+    are condition-driven off live match state, not a fixed clock time, so there's no single "next
+    at" instant to show for them; they're deliberately left out rather than showing something
+    misleading. Mirrors the exact trigger conditions in check_matchday_reminder_notifications()/
+    check_upload_reminder_notifications() above but only *reads* data — never mutates or sends
+    anything, so it's safe to call on every admin-overview request."""
+    now = datetime.now(timezone.utc)
+    upcoming = []
+    draw = current_draw('stryktipset')
+    if not draw or not draw.get('draw_number') or not draw.get('reg_close_time'):
+        return upcoming
+    draw_number = draw['draw_number']
+    try:
+        close_time = datetime.fromisoformat(draw['reg_close_time'].replace('Z', '+00:00'))
+    except Exception:
+        return upcoming
+
+    if draw_number not in (data.get('matchday_reminder_sent') or []):
+        close_local = close_time.astimezone(STOCKHOLM_TZ)
+        fire_at = close_local.replace(hour=14, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
+        if fire_at > now:
+            upcoming.append({'label': 'Matchdagspåminnelse (14:00)', 'at': fire_at.isoformat()})
+
+    has_coupon = any(
+        w.get('product', 'stryktipset') == 'stryktipset' and w.get('draw_number') == draw_number
+        for w in data.get('weeks', [])
+    )
+    if not has_coupon:
+        tiers_sent = (data.get('upload_reminders_sent') or {}).get(f'stryktipset-{draw_number}', [])
+        for hours, tier, label in ((2, '2h', 'Uppladdningspåminnelse (2h kvar)'), (1, '1h', 'Uppladdningspåminnelse (1h kvar)')):
+            if tier in tiers_sent:
+                continue
+            fire_at = close_time - timedelta(hours=hours)
+            if fire_at > now:
+                upcoming.append({'label': label, 'at': fire_at.isoformat()})
+
+    upcoming.sort(key=lambda e: e['at'])
+    return upcoming
+
 def public_data(data):
     """Strip password hashes before this ever reaches the client. last_login rides along here
     too — the frontend only ever renders the logged-in user's own value (see renderMyLastLogin
@@ -1382,12 +1424,33 @@ def admin_overview():
         'username': u.get('username'),
         'display_name': u.get('display_name'),
         'last_login': u.get('last_login'),
+        'last_active': u.get('last_active'),
         'push_enabled': bool(u.get('push_subscriptions')),
         'push_subscription_count': len(u.get('push_subscriptions') or []),
         'goal_notifications_enabled': bool(u.get('goal_notifications_enabled')),
     } for u in data.get('users', [])]
     push_log = list(reversed(data.get('push_log') or []))
-    return jsonify({'status': 'ok', 'users': users, 'poller': _poller_heartbeat, 'push_log': push_log})
+    return jsonify({
+        'status': 'ok', 'users': users, 'poller': _poller_heartbeat, 'push_log': push_log,
+        'next_scheduled_pushes': next_scheduled_pushes(data),
+    })
+
+@app.route('/api/activity-ping', methods=['POST'])
+def activity_ping():
+    """Stamps user.last_active (UTC ISO) — unlike last_login, which only updates on an actual
+    login, this fires every time the app is opened or comes back to the foreground, logged in or
+    not (see pingActivity() in templates/index.html), so the Admin tab can show real recent usage
+    rather than just whoever last typed their password. Same trust level as the rest of this
+    friend-app's session model (see 'Edit-lock' in CLAUDE.md) — the client-supplied username is
+    taken at face value, same as every other endpoint here; nothing sensitive hinges on it."""
+    payload = request.json or {}
+    data = load_data()
+    user = find_user(data, payload.get('username'))
+    if not user:
+        return jsonify({'status': 'error', 'message': 'Unknown user'}), 404
+    user['last_active'] = datetime.now(timezone.utc).isoformat()
+    save_data(data)
+    return jsonify({'status': 'ok'})
 
 @app.route('/api/admin/goal-notifications', methods=['POST'])
 def admin_goal_notifications():

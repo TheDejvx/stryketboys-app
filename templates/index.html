@@ -799,6 +799,18 @@ async function ensurePushSubscription() {
   }
 }
 
+// Fire-and-forget "I was just in the app" stamp — unlike last_login (only updates on an actual
+// login), this fires on every app open/foreground regardless of login state, so the Admin tab's
+// "senaste aktivitet" can reflect real usage, not just whoever last typed their password.
+function pingActivity() {
+  const session = getSession();
+  if (!session) return;
+  fetch('/api/activity-ping', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username: session.username }),
+  }).catch(() => {});
+}
+
 // Client-side gate is just for hiding the tab from everyone else's view — the actual data
 // fetch (renderAdminOverview) is separately checked server-side against the real stored
 // is_admin flag (_require_admin() in app.py), same trust level as the rest of this app.
@@ -883,6 +895,7 @@ async function init() {
   await loadData(); // populates state.weeks first — neededDraws() below reads it
   await loadAllDraws();
   ensurePushSubscription(); // fire-and-forget — see its own comment for why this runs unconditionally
+  pingActivity();
 }
 // Every draw_number we need fresh data for right now: each product's currently-open draw, plus
 // every product's not-yet-fully-settled week's draw_number (which can differ from "current" —
@@ -992,6 +1005,7 @@ document.addEventListener('visibilitychange', () => {
     loadData();
     loadAllDraws();
     ensurePushSubscription(); // re-verify/refresh with the server every time the app comes back to the foreground, not just on a full reload — see its own comment for why
+    pingActivity();
   }
 });
 // ── HELPERS ──
@@ -1972,14 +1986,29 @@ async function renderAdminOverview() {
       </span>
     </div>`;
 
-    body.innerHTML = pollerHtml + data.users.map(u => {
+    // Only the two *time-based* automatic pushes (matchday reminder, upload-reminder tiers) have
+    // a real "next at" instant — the other three (first match, fully settled, goal notifications)
+    // fire off live match state instead, so there's nothing fixed-clock to show for those; see
+    // next_scheduled_pushes() in app.py for the exact same reasoning server-side.
+    const nextPushes = data.next_scheduled_pushes || [];
+    const nextPushHtml = `<div class="schedule-row">
+      <span class="schedule-name">⏰ Nästa schemalagda push</span>
+      <span class="schedule-date">${nextPushes.length
+        ? nextPushes.map(p => `${esc(p.label)}: ${esc(new Date(p.at).toLocaleString('sv-SE', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }))}`).join(' · ')
+        : 'Ingen tidsstyrd push inplanerad just nu'}</span>
+    </div>`;
+
+    body.innerHTML = pollerHtml + nextPushHtml + data.users.map(u => {
       const loginStr = u.last_login
         ? new Date(u.last_login).toLocaleString('sv-SE', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })
+        : 'Aldrig';
+      const activeStr = u.last_active
+        ? new Date(u.last_active).toLocaleString('sv-SE', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })
         : 'Aldrig';
       const pushStr = u.push_enabled ? `🔔 På (${u.push_subscription_count})` : '🔕 Av';
       return `<div class="schedule-row">
         <span class="schedule-name">${esc(u.display_name)}</span>
-        <span class="schedule-date">${pushStr} · Inloggad ${esc(loginStr)}</span>
+        <span class="schedule-date">${pushStr} · Inloggad ${esc(loginStr)} · Senast i appen ${esc(activeStr)}</span>
       </div>`;
     }).join('');
 
