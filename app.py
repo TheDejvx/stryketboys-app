@@ -196,7 +196,21 @@ def week_date_label(rows, draw_number):
         return f'v{draw_number}'
     return format_draw_date(min(starts))
 
-def broadcast_push(data, title, body, tag=None, exclude_username=None, results_out=None):
+PUSH_LOG_MAX = 50
+
+def _log_push(log_target, title, body, tag, **extra):
+    """Appends one entry to log_target['push_log'], capped to the last PUSH_LOG_MAX — the
+    persisted record behind the Admin tab's "📜 Push-logg" card. Takes an explicit log_target
+    rather than always using broadcast_push's own `data` param because several callers pass a
+    throwaway {'users': [...]} dict there (to scope a send to one user or a chosen subset)
+    instead of the real, about-to-be-saved data document — logging into that throwaway dict
+    would just be silently lost the moment the request/cycle ends."""
+    entry = {'at': datetime.now(timezone.utc).isoformat(), 'title': title, 'body': body, 'tag': tag, **extra}
+    log = log_target.setdefault('push_log', [])
+    log.append(entry)
+    del log[:-PUSH_LOG_MAX]
+
+def broadcast_push(data, title, body, tag=None, exclude_username=None, results_out=None, log_data=None):
     """Send a Web Push notification to every user with at least one stored subscription.
     Mutates data['users'][*]['push_subscriptions'] in place to drop subscriptions the push
     service reports as gone (404/410 — the browser unsubscribed, e.g. app uninstalled), so the
@@ -208,16 +222,22 @@ def broadcast_push(data, title, body, tag=None, exclude_username=None, results_o
     *stored* but nothing about whether it's actually still deliverable (a subscription can look
     fine server-side for a long time after the push service has silently revoked it, since that's
     only discovered on the next real send attempt — see "Push notifications" in CLAUDE.md for the
-    history of subscriptions going silently stale). Other callers just omit it, unchanged."""
+    history of subscriptions going silently stale). Other callers just omit it, unchanged.
+    `log_data`, if given, is where the push-log entry (see _log_push()) is written instead of
+    `data` — needed by every caller that passes a throwaway {'users': [...]} dict as `data` here,
+    so the log entry still lands in the real document the caller actually saves. Callers that
+    already pass their real data straight through can omit it; it then just defaults to `data`."""
+    log_target = log_data if log_data is not None else data
     if not (VAPID_PRIVATE_KEY and VAPID_PUBLIC_KEY):
         print(f'broadcast_push: skipped "{title}" — VAPID_PRIVATE_KEY/VAPID_PUBLIC_KEY not configured')
         if results_out is not None:
             for user in data.get('users', []):
                 results_out[user.get('username')] = 'VAPID keys not configured'
+        _log_push(log_target, title, body, tag, skipped='VAPID keys not configured')
         return False
     from pywebpush import webpush, WebPushException
     changed = False
-    sent, skipped_no_sub = 0, []
+    sent, skipped_no_sub, users_reached = 0, [], 0
     for user in data.get('users', []):
         username = user.get('username')
         if exclude_username and (username or '').lower() == exclude_username.lower():
@@ -255,6 +275,8 @@ def broadcast_push(data, title, body, tag=None, exclude_username=None, results_o
                 keep.append(sub)  # transient error — keep it, don't discard on a whim
         if len(keep) != len(subs):
             user['push_subscriptions'] = keep
+        if user_sent:
+            users_reached += 1
         if results_out is not None:
             if user_sent:
                 results_out[username] = f'sent ({user_sent}/{len(subs)} device(s))'
@@ -263,6 +285,7 @@ def broadcast_push(data, title, body, tag=None, exclude_username=None, results_o
             else:
                 results_out[username] = f'send failed ({user_failed}) — see server logs'
     print(f'broadcast_push: "{title}" — sent to {sent} subscription(s), no subscription on file for {skipped_no_sub or "none"}')
+    _log_push(log_target, title, body, tag, devices_sent=sent, users_reached=users_reached, users_no_sub=len(skipped_no_sub))
     return changed
 
 def check_first_match_notifications(data):
@@ -382,6 +405,7 @@ def check_upload_reminder_notifications(data):
                 title='⏰ 2 timmar kvar!',
                 body=f'Du är på tur att ladda upp {PRODUCT_LABELS.get(product, product)} {date_label} — glöm inte kupongen!',
                 tag=f'reminder-2h-{key}',
+                log_data=data,
             )
         if hours_left <= 1 and '1h' not in tiers_sent:
             tiers_sent.append('1h')
@@ -391,6 +415,7 @@ def check_upload_reminder_notifications(data):
                 title='🚨 SISTA CHANSEN — 1 timme kvar!',
                 body=f'{PRODUCT_LABELS.get(product, product)} {date_label} stänger snart och ingen kupong är uppladdad än. Ladda upp NU!',
                 tag=f'reminder-1h-{key}',
+                log_data=data,
             )
     return changed
 
@@ -876,6 +901,7 @@ def check_goal_notifications(data):
                 body=f'{row.get("home")} - {row.get("away")}: {score[0]}-{score[1]} ({sign})'
                      f'{" · " + minute if minute else ""} — Ni har bettat: {picks}',
                 tag=f'goal-{match_id}-{score[0]}-{score[1]}',
+                log_data=data,
             ):
                 changed = True
     return changed
@@ -1326,11 +1352,11 @@ def push_test():
     user = find_user(data, username)
     if not user:
         return jsonify({'status': 'error', 'message': 'Unknown user'}), 404
-    if broadcast_push({'users': [user]}, title=title, body=body, tag='test-push'):
+    if broadcast_push({'users': [user]}, title=title, body=body, tag='test-push', log_data=data):
         for u in data.get('users', []):
             if u.get('username') == user.get('username'):
                 u['push_subscriptions'] = user.get('push_subscriptions')
-        save_data(data)
+    save_data(data)  # always, not just on a dropped subscription — the push-log entry needs saving too
     return jsonify({'status': 'ok'})
 
 def _require_admin(username):
@@ -1357,7 +1383,8 @@ def admin_overview():
         'push_subscription_count': len(u.get('push_subscriptions') or []),
         'goal_notifications_enabled': bool(u.get('goal_notifications_enabled')),
     } for u in data.get('users', [])]
-    return jsonify({'status': 'ok', 'users': users, 'poller': _poller_heartbeat})
+    push_log = list(reversed(data.get('push_log') or []))
+    return jsonify({'status': 'ok', 'users': users, 'poller': _poller_heartbeat, 'push_log': push_log})
 
 @app.route('/api/admin/goal-notifications', methods=['POST'])
 def admin_goal_notifications():
@@ -1472,12 +1499,12 @@ def admin_push_broadcast():
         target_users = [u for u in all_users if (u.get('username') or '').lower() in target_set]
     would_reach = sum(len(u.get('push_subscriptions') or []) for u in target_users)
     delivery = {}
-    if broadcast_push({'users': target_users}, title=title, body=body, tag='admin-broadcast', results_out=delivery):
+    if broadcast_push({'users': target_users}, title=title, body=body, tag='admin-broadcast', results_out=delivery, log_data=data):
         by_username = {u.get('username'): u for u in target_users}
         for u in all_users:
             if u.get('username') in by_username:
                 u['push_subscriptions'] = by_username[u.get('username')]['push_subscriptions']
-        save_data(data)
+    save_data(data)  # always, not just on a dropped subscription — the push-log entry needs saving too
     return jsonify({'status': 'ok', 'targeted_users': len(target_users), 'would_reach_devices': would_reach, 'delivery': delivery})
 
 @app.route('/api/push/debug', methods=['POST'])

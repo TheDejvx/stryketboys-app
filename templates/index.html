@@ -470,6 +470,13 @@ body {
         </div>
       </div>
       <div class="card">
+        <div class="card-header"><h2>📜 Push-logg</h2></div>
+        <div style="font-size:11px;color:var(--muted);padding:0 16px 8px">De senaste push-notiserna som gått ut (eller hoppats över), oavsett om det var automatiskt eller manuellt skickat</div>
+        <div id="admin-push-log-body">
+          <div class="loading-row">Laddar...</div>
+        </div>
+      </div>
+      <div class="card">
         <div class="card-header"><h2>⚽ Målnotiser</h2></div>
         <div style="font-size:11px;color:var(--muted);padding:0 16px 8px">Vem som får en extra push vid varje mål i en aktiv kupong (match, målskytt, minut, resultat och vad man bettat)</div>
         <div id="admin-goal-notif-body">
@@ -1986,6 +1993,27 @@ async function renderAdminOverview() {
         <span class="schedule-name">${esc(u.display_name)}</span>
         <span class="schedule-date"><input type="checkbox" ${u.goal_notifications_enabled ? 'checked' : ''} onchange="toggleGoalNotifications('${esc(u.username)}', this)"></span>
       </label>`).join('');
+    }
+
+    const pushLogEl = document.getElementById('admin-push-log-body');
+    if (pushLogEl) {
+      const entries = data.push_log || [];
+      pushLogEl.innerHTML = entries.length ? entries.map(e => {
+        const when = e.at
+          ? new Date(e.at).toLocaleString('sv-SE', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })
+          : '?';
+        const reachStr = e.skipped
+          ? `⚠️ Hoppades över — ${esc(e.skipped)}`
+          : `${e.devices_sent || 0} enhet(er), ${e.users_reached || 0} person(er)${e.users_no_sub ? ` · ${e.users_no_sub} utan prenumeration` : ''}`;
+        return `<div class="schedule-row" style="align-items:flex-start;flex-direction:column;gap:2px">
+          <div style="display:flex;justify-content:space-between;width:100%">
+            <span class="schedule-name">${esc(e.title || '')}</span>
+            <span class="schedule-date">${esc(when)}</span>
+          </div>
+          <div style="font-size:12px;color:var(--muted)">${esc(e.body || '')}</div>
+          <div style="font-size:11px;color:var(--muted)">${reachStr}</div>
+        </div>`;
+      }).join('') : `<div class="loading-row">Inga push-notiser skickade än.</div>`;
     }
 
     const turnEl = document.getElementById('admin-uploader-turn-body');
