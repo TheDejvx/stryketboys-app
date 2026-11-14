@@ -1323,13 +1323,16 @@ def save_coupon():
 
     # Only a genuinely new week fires the "new coupon" push — a re-upload correcting an existing
     # one (see "Kupong shows all active coupons" in CLAUDE.md) shouldn't spam the group again.
+    # Goes to literally everyone now, including the uploader themselves (asked for directly) —
+    # previously excluded via exclude_username, on the reasoning that you already know you just
+    # uploaded it; in practice that exclusion made this push impossible to verify from the
+    # uploader's own device, which is exactly the device someone checks first.
     if is_new_week:
         broadcast_push(
             data,
             title='Ny kupong uppladdad',
             body=f'{payload.get("uploaded_by") or "Någon"} laddade upp {PRODUCT_LABELS.get(product, product)} {week_date_label(week.get("rows"), week.get("draw_number"))}',
             tag=f'new-coupon-{week_id}',
-            exclude_username=payload.get('uploaded_by_username'),
         )
 
     save_data(data)
